@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT=/home/zehao/echo-collab/T061
 export PATH=/home/zehao/.conda/envs/tree-edge/bin:/home/zehao/miniforge3/bin:$PATH
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CC=/home/zehao/.conda/envs/tree-edge/bin/x86_64-conda-linux-gnu-cc
 export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/ray-smoke
 export ENABLE_EXPERIENCE_EVOLUTION=false ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
 export MODEL_PATH=/home/zehao/Tree-GRPO/model/Qwen2.5-3B-Instruct
