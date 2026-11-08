@@ -8,6 +8,8 @@ export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/ray-smoke
 export ENABLE_EXPERIENCE_EVOLUTION=false ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
 export MODEL_PATH=/home/zehao/Tree-GRPO/model/Qwen2.5-3B-Instruct
 export TRAIN_DATA=$ROOT/data/train.parquet VAL_DATA=$ROOT/data/validation.parquet
+export EMBEDDING_MODEL=$ROOT/assets/Qwen3-Embedding-0.6B
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SEARCH_URL=http://127.0.0.1:29661/retrieve
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 export N_GPUS_PER_NODE=4 TRAIN_DATA_SIZE=32 VAL_DATA_SIZE=128 GROUP_SIZE=8
