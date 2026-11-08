@@ -62,7 +62,7 @@ TENSOR_MODEL_PARALLEL_SIZE=${TENSOR_MODEL_PARALLEL_SIZE:-1}
 NUM_CPUS_PER_ENV_WORKER=${NUM_CPUS_PER_ENV_WORKER:-0.1}
 TRAIN_DATA_SIZE=${TRAIN_DATA_SIZE:-256}
 VAL_DATA_SIZE=${VAL_DATA_SIZE:-512}
-GROUP_SIZE=${GROUP_SIZE:-4}
+GROUP_SIZE=${GROUP_SIZE:-8}
 
 if [[ "$ENABLE_EXP_ROLLOUT" == "true" ]] && (( GROUP_SIZE % 2 != 0 )); then
     echo "GROUP_SIZE must be even when ENABLE_EXP_ROLLOUT=true; got $GROUP_SIZE." >&2
@@ -147,6 +147,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_best_checkpoint=True \
     trainer.best_checkpoint_metric=val/success_rate \
     trainer.test_freq=200 \
-    trainer.total_epochs=0 \
+    trainer.total_epochs=5 \
+    trainer.total_training_steps=5 \
     trainer.val_before_train=True \
     "$@"

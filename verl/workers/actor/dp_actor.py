@@ -357,6 +357,7 @@ class DataParallelPPOActor(BasePPOActor):
             self.actor_optimizer.zero_grad()
         else:
             self.actor_optimizer.step()
+            self._optimizer_steps_this_update = getattr(self, "_optimizer_steps_this_update", 0) + 1
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
@@ -427,6 +428,7 @@ class DataParallelPPOActor(BasePPOActor):
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
+        self._optimizer_steps_this_update = 0
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -636,4 +638,5 @@ class DataParallelPPOActor(BasePPOActor):
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
+        metrics["actor/optimizer_steps_per_train_step"] = [self._optimizer_steps_this_update]
         return metrics

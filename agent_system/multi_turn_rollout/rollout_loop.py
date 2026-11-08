@@ -323,7 +323,7 @@ class TrajectoryCollector:
 
         teacher_text_obs = envs.build_edge_teacher_text_obs(
             obs['anchor'] if obs.get('anchor', None) is not None else obs['text'],
-            envs.envs.get_admissible_commands,
+            getattr(envs.envs, "get_admissible_commands", None),
         )
         device = batch.batch['responses'].device
         teacher_prompt_texts = [self._apply_chat_template_to_text_obs(text_obs) for text_obs in teacher_text_obs]

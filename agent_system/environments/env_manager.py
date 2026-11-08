@@ -355,6 +355,33 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
         return postprocess_text_obs
 
 
+    def build_edge_teacher_text_obs(self, text_obs, admissible_actions=None, init=False):
+        """Build search teacher text from the same current history and experience."""
+        prompts = []
+        no_history = init or self.config.env.history_length <= 0 or all(
+            len(self.memory[i]) == 0 for i in range(len(text_obs))
+        )
+        if not no_history:
+            history, _ = self.memory.fetch(
+                self.config.env.history_length, obs_key="information", action_key="search"
+            )
+        for i in range(len(text_obs)):
+            if self.retrieval_memory is not None and self.retrieved_memories is not None:
+                experience = self.retrieval_memory.format_for_prompt(self.retrieved_memories[i])
+            else:
+                experience = "No state-relevant experience found for this turn."
+            if no_history:
+                prompt = SEARCH_TEMPLATE_NO_HIS_WITH_MEMORY.format(
+                    task_description=self.tasks[i], retrieved_memories=experience
+                )
+            else:
+                prompt = SEARCH_TEMPLATE_WITH_MEMORY.format(
+                    task_description=self.tasks[i], retrieved_memories=experience,
+                    step_count=len(self.memory[i]), memory_context=history[i],
+                )
+            prompts.append(prompt)
+        return prompts
+
     def _process_batch(self, batch_idx, total_batch_list, total_infos, success):
         # Find the last entry with active masks
         for i in reversed(range(len(total_batch_list[batch_idx]))):
