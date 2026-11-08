@@ -11,6 +11,7 @@ export TRAIN_DATA=$ROOT/data/train.parquet VAL_DATA=$ROOT/data/validation.parque
 export SEARCH_URL=http://127.0.0.1:29661/retrieve
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 export N_GPUS_PER_NODE=4 TRAIN_DATA_SIZE=32 VAL_DATA_SIZE=128 GROUP_SIZE=8
+export WANDB_MODE=offline
 export WANDB_BASE_URL=https://api.forge.coreweave.com WANDB_ENTITY=wuzehao1214-sun-yat-sen-university
 cd "$ROOT/EDGE"
 bash examples/grpo_trainer/run_search_edge.sh vllm \
