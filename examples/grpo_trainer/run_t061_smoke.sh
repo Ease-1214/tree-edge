@@ -3,6 +3,7 @@ set -euo pipefail
 ROOT=/home/zehao/echo-collab/T061
 export PATH=/home/zehao/.conda/envs/tree-edge/bin:/home/zehao/miniforge3/bin:$PATH
 export CUDA_VISIBLE_DEVICES=0,1,2,3
+export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/ray-smoke
 export ENABLE_EXPERIENCE_EVOLUTION=false ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
 export MODEL_PATH=/home/zehao/Tree-GRPO/model/Qwen2.5-3B-Instruct
 export TRAIN_DATA=$ROOT/data/train.parquet VAL_DATA=$ROOT/data/validation.parquet
@@ -27,8 +28,9 @@ bash examples/grpo_trainer/run_search_edge.sh vllm \
  actor_rollout_ref.rollout.n=1 \
  env.search.api_format=search_r1_batch \
  env.experience_memory.device=cpu \
- trainer.total_training_steps=1 trainer.total_epochs=1 trainer.test_freq=20 \
+ ray_init.num_cpus=24 trainer.total_training_steps=1 trainer.total_epochs=1 trainer.test_freq=20 \
  trainer.project_name=tree-edge-stage0 trainer.experiment_name=t061-edge-lora-smoke \
  trainer.rollout_data_dir=$ROOT/smoke/rollouts \
  trainer.validation_data_dir=$ROOT/smoke/validation \
- trainer.default_local_dir=$ROOT/smoke/checkpoints
+ trainer.default_local_dir=$ROOT/smoke/checkpoints \
+ "$@"
