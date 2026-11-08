@@ -146,7 +146,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=5 \
     trainer.save_best_checkpoint=True \
     trainer.best_checkpoint_metric=val/success_rate \
-    trainer.test_freq=200 \
+    trainer.test_freq=20 \
     trainer.total_epochs=5 \
     trainer.total_training_steps=5 \
     trainer.val_before_train=True \
