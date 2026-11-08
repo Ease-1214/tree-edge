@@ -20,6 +20,7 @@ class SearchEnv(BaseTextEnv):
         # name is hardcoded to "SearchToolGroup", with tool name "search"
         self.tool_group = SearchToolGroup(
             search_url=env_config.search_url,
+            api_format=env_config.get("api_format", "edge_single"),
             topk=env_config.topk,
             timeout=env_config.timeout,
             log_requests=env_config.log_requests,

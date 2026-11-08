@@ -25,6 +25,7 @@ def call_search_api(
     timeout: int = DEFAULT_TIMEOUT,
     log_requests: bool = True,
     session: Optional[requests.Session] = None,
+    api_format: str = "edge_single",
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Calls the search API with a single query.
@@ -45,7 +46,11 @@ def call_search_api(
     request_id = str(uuid.uuid4())
     log_prefix = f"[Search Request ID: {request_id}] "
 
+    if api_format not in {"edge_single", "search_r1_batch"}:
+        raise ValueError(f"Unknown search API format: {api_format}")
     payload = {"query": query, "topk": topk, "return_scores": return_scores}
+    if api_format == "search_r1_batch":
+        payload = {"queries": [query], "topk": topk, "return_scores": return_scores}
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
     # Use provided session or create a new one for this request
@@ -90,7 +95,14 @@ def call_search_api(
             if should_close_session:
                 session.close()
 
-            return response.json(), None
+            data = response.json()
+            if api_format == "search_r1_batch":
+                results = data.get("result")
+                if not isinstance(results, list) or len(results) != 1:
+                    raise ValueError("Expected exactly one Search-R1 result batch")
+                # Preserve the outer grouping expected by the unchanged formatter.
+                data = dict(data, result=[results[0]])
+            return data, None
 
         except requests.exceptions.ConnectionError as e:
             last_error = f"{log_prefix}Connection Error: {e}"
@@ -161,7 +173,8 @@ class SearchToolGroup(ToolGroup):
                 logger.info(f"Created shared session pool for {base_url}")
             return cls._session_pool[base_url]
 
-    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_requests=True):
+    def __init__(self, search_url="http://127.0.0.1:8000/retrieve", topk=3, timeout=DEFAULT_TIMEOUT, log_requests=True, api_format="edge_single"):
+        self.api_format = api_format
         self.search_url = search_url
         self.topk = topk
         self.timeout = timeout
@@ -193,6 +206,7 @@ class SearchToolGroup(ToolGroup):
                 topk=self.topk,
                 timeout=self.timeout,
                 log_requests=self.log_requests,
+                api_format=self.api_format,
                 session=self.session,  # Pass our shared session for connection reuse
             )
         except Exception as e:
