@@ -829,6 +829,8 @@ class DataParallelPPOActor(BasePPOActor):
         self.actor_optimizer.zero_grad()
         if getattr(self, "_edge_teacher_rows_total", 0):
             metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
+            metrics["perf/edge_teacher_rows"] = self._edge_teacher_rows
+            metrics["perf/edge_student_rows"] = self._edge_teacher_rows_total
             self._edge_teacher_rows = self._edge_teacher_rows_total = 0
         metrics["actor/optimizer_steps_per_train_step"] = [self._optimizer_steps_this_update]
         metrics["actor/effective_minibatch_rows_per_rank"] = self.config.ppo_mini_batch_size

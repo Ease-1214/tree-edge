@@ -700,6 +700,9 @@ class ActorRolloutRefWorker(Worker):
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
+            if data.meta_info.get("tree_mode", False):
+                from agent_system.tree.metrics import gather_tree_metrics
+                metrics = gather_tree_metrics(metrics)
             output = DataProto(meta_info={"metrics": metrics})
 
             output = self.ulysses_sharding_manager.postprocess_data(data=output)
