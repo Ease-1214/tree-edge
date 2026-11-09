@@ -610,10 +610,65 @@ class ActorRolloutRefWorker(Worker):
 
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            # The diagnostic uses the actual FSDP Actor path without an optimizer step.
+            if os.environ.get("EDGE_SMOKE_AUDIT") == "1" and not getattr(self, "_t061_topk_probed", False):
+                from peft.tuners.tuners_utils import BaseTunerLayer
+                from verl.trainer.ppo.core_algos import compute_edge_teacher_topk_distillation_loss
+                micro = data.batch[:1]
+                teacher_batch = {
+                    "responses": micro["responses"],
+                    "input_ids": micro["edge_teacher_input_ids"],
+                    "attention_mask": micro["edge_teacher_attention_mask"],
+                    "position_ids": micro["edge_teacher_position_ids"],
+                }
+                layers = [module for module in self.actor.actor_module.modules() if isinstance(module, BaseTunerLayer)]
+                assert layers and not any(layer.disable_adapters for layer in layers)
+                self.actor.actor_optimizer.zero_grad(set_to_none=True)
+                with self.actor.actor_module.disable_adapter(), torch.no_grad():
+                    assert all(layer.disable_adapters for layer in layers)
+                    self.actor._forward_micro_batch(micro_batch=micro, temperature=1.0, calculate_entropy=False)
+                assert not any(layer.disable_adapters for layer in layers)
+                with torch.no_grad():
+                    _, _, teacher_logits, teacher_ids = self.actor._forward_micro_batch(
+                        micro_batch=teacher_batch, temperature=1.0, calculate_entropy=False,
+                        calculate_log_probs=False, token_selection_top_k=20,
+                    )
+                _, _, student_logits, _ = self.actor._forward_micro_batch(
+                    micro_batch=micro, temperature=1.0, calculate_entropy=False,
+                    calculate_log_probs=False, token_selection_top_k=20, token_selection_ids=teacher_ids,
+                )
+                mask = micro["loss_mask"][:, -micro["responses"].shape[1]:] if data.meta_info.get("multi_turn") else micro["attention_mask"][:, -micro["responses"].shape[1]:]
+                probe_loss, _ = compute_edge_teacher_topk_distillation_loss(
+                    student_topk_logits=student_logits, teacher_topk_logits=teacher_logits,
+                    response_mask=mask, edge_distill_weight=torch.ones(1, device=mask.device),
+                    loss_agg_mode=self.config.actor.loss_agg_mode,
+                )
+                assert torch.isfinite(probe_loss)
+                probe_loss.backward()
+                grads = [parameter.grad for parameter in self.actor.actor_module.parameters() if parameter.grad is not None]
+                assert grads and all(torch.isfinite(gradient).all() for gradient in grads)
+                print(f"T061_FSDP_TOPK rank={self.rank} loss={probe_loss.item()} finite_gradients=True reference_disabled=True teacher_enabled=True optimizer_steps=0 peak_GiB={torch.cuda.max_memory_allocated()/1024**3}", flush=True)
+                self.actor.actor_optimizer.zero_grad(set_to_none=True)
+                del probe_loss, teacher_logits, teacher_ids, student_logits, grads, teacher_batch, micro
+                self._t061_topk_probed = True
+                torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
             # perform training
             with Timer(name="update_policy", logger=None) as timer:
                 metrics = self.actor.update_policy(data=data)
             delta_time = timer.last
+            print(f"T061_STAGE rank={self.rank} stage=actor_update seconds={delta_time} peak_GiB={torch.cuda.max_memory_allocated()/1024**3}", flush=True)
+            if os.environ.get("EDGE_SMOKE_AUDIT") == "1":
+                import hashlib
+                with FSDP.summon_full_params(self.actor_module_fsdp, writeback=False):
+                    checksum = hashlib.sha256()
+                    for name, parameter in sorted(self.actor_module_fsdp.named_parameters()):
+                        if name.endswith((".lora_A.default.weight", ".lora_B.default.weight")):
+                            canonical = name.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight")
+                            checksum.update(canonical.encode())
+                            checksum.update(parameter.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+                self.rollout_sharding_manager.expected_adapter_sha256 = checksum.hexdigest()
+                print(f"T061_POST_UPDATE_LORA rank={self.rank} sha256={checksum.hexdigest()}", flush=True)
             global_num_tokens = data.meta_info["global_token_num"]
             estimated_flops, promised_flops = self.flops_counter.estimate_flops(global_num_tokens, delta_time)
             metrics["perf/mfu/actor"] = estimated_flops * self.config.actor.ppo_epochs / promised_flops / self.world_size
@@ -642,6 +697,9 @@ class ActorRolloutRefWorker(Worker):
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
+        import time
+        stage_start = time.perf_counter()
+        torch.cuda.reset_peak_memory_stats()
         # Support all hardwares
         prompts = prompts.to(get_torch_device().current_device())
 
@@ -666,11 +724,15 @@ class ActorRolloutRefWorker(Worker):
 
         # clear kv cache
         get_torch_device().empty_cache()
+        print(f"T061_STAGE rank={self.rank} stage=rollout seconds={time.perf_counter()-stage_start} peak_GiB={torch.cuda.max_memory_allocated()/1024**3}", flush=True)
         return output
 
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def compute_log_prob(self, data: DataProto):
+        import time
+        stage_start = time.perf_counter()
+        torch.cuda.reset_peak_memory_stats()
         # when is_lora is True, we use the actor without lora applied to calculate the log_prob
         # which is mostly used for ref log_prob calculation
         assert self._is_actor
@@ -709,6 +771,7 @@ class ActorRolloutRefWorker(Worker):
             offload_fsdp_model_to_cpu(self.actor_module_fsdp)
             log_gpu_memory_usage("After offload actor model during compute_log_prob", logger=logger)
 
+        print(f"T061_STAGE rank={self.rank} stage={'ref_logprob' if is_lora else 'old_logprob'} seconds={time.perf_counter()-stage_start} peak_GiB={torch.cuda.max_memory_allocated()/1024**3}", flush=True)
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)

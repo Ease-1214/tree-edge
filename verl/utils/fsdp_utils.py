@@ -481,6 +481,12 @@ def layered_summon_lora_params(fsdp_module)->OrderedDict:
             if fsdp_version(submodule) > 0:
                 with FSDP.summon_full_params(submodule, writeback=False):
                     sub_lora_params = get_peft_model_state_dict(fsdp_module._fsdp_wrapped_module, state_dict=submodule.state_dict())
+                    if not sub_lora_params:
+                        sub_lora_params = {
+                            key.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight"): value
+                            for key, value in submodule.named_parameters()
+                            if key.endswith((".lora_A.default.weight", ".lora_B.default.weight"))
+                        }
                     sub_lora_params = {f"{prefix}.{name}": param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu()
                         for name, param in sub_lora_params.items()}
                     lora_params.update(sub_lora_params)

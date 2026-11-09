@@ -292,7 +292,26 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                 for name, tensor in sorted(updated_params.items()):
                     checksum.update(name.encode())
                     checksum.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
-                print(f"T061_LORA_SYNC id={lora_int_id} tensors={len(updated_params)} sha256={checksum.hexdigest()}", flush=True)
+                source_hash = checksum.hexdigest()
+                expected = getattr(self, "expected_adapter_sha256", None)
+                if expected is not None and expected != source_hash:
+                    raise RuntimeError("Rollout adapter differs from last Actor update")
+                cached = self.model_runner.lora_manager._adapter_manager.get_adapter(lora_int_id)
+                cached_hash = hashlib.sha256()
+                cache_tensor_count = 0
+                for layer_name, layer in sorted(cached.loras.items()):
+                    for attribute in ("lora_a", "lora_b"):
+                        values = getattr(layer, attribute)
+                        values = values if isinstance(values, (list, tuple)) else [values]
+                        for index, tensor in enumerate(values):
+                            if tensor is None:
+                                continue
+                            cached_hash.update(f"{layer_name}.{attribute}.{index}".encode())
+                            cached_hash.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+                            cache_tensor_count += 1
+                if cache_tensor_count == 0:
+                    raise RuntimeError("vLLM adapter cache has no tensors")
+                print(f"T061_LORA_SYNC id={lora_int_id} tensors={len(updated_params)} sha256={source_hash} cache_tensors={cache_tensor_count} cache_sha256={cached_hash.hexdigest()} matches_last_update={expected == source_hash}", flush=True)
                 logger.info(f"vLLM load weights, loaded_params: {len(updated_params)}")
                 return
             else:
