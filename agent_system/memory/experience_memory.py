@@ -673,6 +673,11 @@ class ExperienceMemory(BaseMemory):
                 resp.raise_for_status()
                 body = resp.json()
                 arr = np.frombuffer(base64.b64decode(body["data"]), dtype=np.float32)
+                audit_path = os.environ.get("EDGE_EMBED_REQUEST_LOG", "")
+                if audit_path:
+                    with open(audit_path, "a") as handle:
+                        handle.write(json.dumps(dict(texts=list(texts), rows=len(texts),
+                            seconds=body["seconds"], client=payload["client"]))+"\n")
                 return arr.reshape(body["shape"]).copy()
             except Exception as exc:  # network blip or server restart
                 last_exc = exc

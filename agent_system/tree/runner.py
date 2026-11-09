@@ -182,7 +182,8 @@ def pack_training_rows(collector, tree, rows):
     fields = {"uid": [], "traj_uid": [], "leaf_id": [], "node_id": [], "fork_id": [], "row_id": [],
         "step_idx": [], "data_source": [], "rewards": [], "episode_rewards": [], "episode_lengths": [],
         "tool_callings": [], "is_action_valid": [], "active_masks": [], "trajectory_success": [],
-        "success_rate": [], "anchor_obs": [], "task_description": []}
+        "success_rate": [], "anchor_obs": [], "task_description": [],
+        "path_has_T": [], "kd_triggered": [], "experience_ids": [], "kd_noexp_prompt_ids": []}
     success = statistics.mean(leaf.reward for leaf in tree.leaves)
     leaf_map = {leaf.leaf_id: leaf for leaf in tree.leaves}
     kd_student, kd_teacher = [], []
@@ -195,13 +196,16 @@ def pack_training_rows(collector, tree, rows):
             episode_rewards=row["reward"], episode_lengths=len(leaf.node_ids),
             tool_callings=sum(tree.nodes[n].action.startswith("<search>") for n in leaf.node_ids),
             is_action_valid=node.valid, active_masks=True, trajectory_success=row["reward"],
-            success_rate=success, anchor_obs=node.state_before.last_observation, task_description=node.state_before.question)
+            success_rate=success, anchor_obs=node.state_before.last_observation, task_description=node.state_before.question,
+            path_has_T=node.path_has_T, kd_triggered=row["kd_canonical"],
+            experience_ids=list(node.new_experience_ids), kd_noexp_prompt_ids=[])
         for key, value in values.items():
             fields[key].append(value)
         if row["kd_canonical"]:
             right = tree.nodes[tree.forks[row["fork_id"]].right_node_id]
             student = collector._tokenize_text_prompts([node.noexp_prompt_text], "cpu")
             R = node.tensors["responses"].numel()
+            fields["kd_noexp_prompt_ids"][-1] = student["input_ids"][0].tolist()
             kd_student.append(student)
             kd_teacher.append(dict(input_ids=right.tensors["input_ids"][:-R].unsqueeze(0), attention_mask=right.tensors["attention_mask"][:-R].unsqueeze(0)))
         else:
@@ -251,6 +255,9 @@ def audit_training_tokens(batch, tree, step, path, seed=0):
             fork = tree.forks[node.fork_id]
             right = tree.nodes[fork.right_node_id]
             assert batch.batch["kd_canonical"][i]
+            assert any(a["fork_id"] == fork.fork_id and a["gate"] for a in tree.audits)
+            assert batch.batch["kd_student_input_ids"][i,:-R].tolist() == list(batch.non_tensor_batch["kd_noexp_prompt_ids"][i])
+            assert torch.equal(batch.batch["kd_student_input_ids"][i,-R:], node.tensors["responses"])
             assert torch.equal(batch.batch["edge_teacher_input_ids"][i,:-R], right.tensors["input_ids"][:-R])
             assert torch.equal(batch.batch["edge_teacher_input_ids"][i,-R:], node.tensors["responses"])
             eligible["kd"].extend((i,t) for t in valid)

@@ -182,9 +182,9 @@ class QuestionEvidence:
         n = len(values)
         mean = statistics.mean(values) if n else 0.
         sd = statistics.stdev(values) if n > 1 else 0.
-        se = sd / math.sqrt(n) if n > 1 else float("inf")
+        se = sd / math.sqrt(n) if n > 1 else None
         return dict(n=n, mean=mean, sample_std=sd, standard_error=se,
-                    upper_2se=mean + 2 * se)
+                    upper_2se=mean + 2 * se if se is not None else None)
 
     def merge_window(self, bank, step, beta=.1, min_questions=20, protect_recent_steps=20):
         updates, removed = [], []
@@ -202,7 +202,7 @@ class QuestionEvidence:
                     updates.append(dict(experience_id=eid, old_utility=old, utility=item["utility"], delta_window=delta))
                 item.setdefault("evidence", {})["tree_question_statistics"] = stats
                 old_enough = step - int(item.get("created_at_step", 0)) >= protect_recent_steps
-                if stats["n"] >= min_questions and stats["upper_2se"] < 0 and old_enough:
+                if stats["n"] >= max(2, min_questions) and stats["upper_2se"] < 0 and old_enough:
                     removed.append(dict(experience_id=eid, pool=pool, reason="statistical_negative", **stats))
                 else:
                     kept.append(item)
