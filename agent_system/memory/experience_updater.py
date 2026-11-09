@@ -83,7 +83,8 @@ class ExperienceUpdater:
             )
             return reassigned[: self.max_new_experiences_per_update]
         except Exception as e:
-            print(f"[ExperienceUpdater] Error calling {self.model}: {e}")
+            safe_error = str(e).replace(self.client.api_key, "[REDACTED]")
+            print(f"[ExperienceUpdater] Error calling {self.model}: {safe_error}")
             return []
         finally:
             if os.environ.get("T063_REFLECTOR_AUDIT") == "1":
