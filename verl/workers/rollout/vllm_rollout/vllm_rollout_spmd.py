@@ -104,7 +104,10 @@ class vLLMRollout(BaseRollout):
         """
         super().__init__()
         self.config = config
-        assert not (not config.enforce_eager and config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
+        # T062: free_cache_engine only drives the legacy (0.5.4/0.6.3) cache rebuild path. Newer vLLM
+        # always uses sleep/wake_up in the sharding manager, which is compatible with CUDA graphs.
+        if vllm_version in ("0.5.4", "0.6.3"):
+            assert not (not config.enforce_eager and config.free_cache_engine), "disable CUDA graph (enforce_eager = False) if free cache engine"
 
         tensor_parallel_size = self.config.get("tensor_model_parallel_size", 1)
         assert tensor_parallel_size <= torch.distributed.get_world_size(), "tensor parallel size should be less than or equal to the world size"

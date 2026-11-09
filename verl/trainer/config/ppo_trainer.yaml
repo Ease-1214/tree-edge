@@ -28,6 +28,7 @@ actor_rollout_ref:
   hybrid_engine: True
   model:
     init_seed: null # Explicitly set by reproducible LoRA profiles.
+    lora_adapter_dtype: fp32 # T062: trainable LoRA weights stay fp32 even when the frozen base is bf16
     path: ~/models/deepseek-llm-7b-chat
     use_shm: False
     external_lib: null
@@ -89,6 +90,7 @@ actor_rollout_ref:
       total_training_steps: -1  # must be override by program
       weight_decay: 0.01
     fsdp_config:
+      model_dtype: null # T062: null keeps verl default (fp32 actor); bf16 stores the frozen LoRA base in bf16
       wrap_policy:
         # transformer_layer_cls_to_wrap: None
         min_num_params: 0

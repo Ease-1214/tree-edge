@@ -283,6 +283,21 @@ class ActorRolloutRefWorker(Worker):
                     'bias': "none"
                 }
                 actor_module = get_peft_model(actor_module, LoraConfig(**lora_config))
+                # T062: when the frozen base is stored in bf16 (fsdp_config.model_dtype=bf16),
+                # keep the trainable LoRA weights (and hence the AdamW states) in fp32.
+                # With an fp32 base this is a no-op, so the T061 behaviour is unchanged.
+                lora_adapter_dtype = self.config.model.get("lora_adapter_dtype", "fp32")
+                if lora_adapter_dtype is not None:
+                    adapter_dtype = PrecisionType.to_dtype(lora_adapter_dtype)
+                    cast_count = 0
+                    for _, param in actor_module.named_parameters():
+                        if param.requires_grad and param.dtype != adapter_dtype:
+                            param.data = param.data.to(adapter_dtype)
+                            cast_count += 1
+                    if self.rank == 0:
+                        trainable_dtypes = sorted({str(p.dtype) for p in actor_module.parameters() if p.requires_grad})
+                        frozen_dtypes = sorted({str(p.dtype) for p in actor_module.parameters() if not p.requires_grad})
+                        print(f"T062_LORA_DTYPE base={frozen_dtypes} adapter={trainable_dtypes} cast={cast_count}", flush=True)
         torch.distributed.barrier()
 
         if self.rank == 0:
