@@ -37,7 +37,7 @@ bash examples/grpo_trainer/run_search_edge.sh vllm \
  actor_rollout_ref.rollout.load_format=safetensors \
  actor_rollout_ref.rollout.layered_summon=False \
  actor_rollout_ref.rollout.n=1 \
- env.search.api_format=search_r1_batch \
+ env.search.api_format=search_r1_batch env.search.request_batch_size=128 \
  env.experience_memory.device=cuda:0 \
  ray_init.num_cpus=24 trainer.total_training_steps=2 trainer.total_epochs=1 trainer.test_freq=20 \
  trainer.project_name=tree-edge-stage0 trainer.experiment_name=t061-edge-lora-smoke-r2 \
