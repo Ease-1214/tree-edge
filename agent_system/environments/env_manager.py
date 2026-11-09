@@ -179,7 +179,9 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
         obs, infos = self.envs.reset(kwargs=kwargs)
         self.tasks = obs
         self.memory.reset(batch_size=len(obs))
-        if self.retrieval_memory is not None:
+        if getattr(self, "skip_experience_retrieval", False):
+            self.retrieved_memories = None
+        if self.retrieval_memory is not None and not getattr(self, "skip_experience_retrieval", False):
             # Determine which config to use
             if self.config.env.get('use_experience_memory', False):
                 mem_config = self.config.env.experience_memory
@@ -244,6 +246,7 @@ class SearchEnvironmentManager(EnvironmentManagerBase):
 
         if (
             self.retrieval_memory is not None
+            and not getattr(self, "skip_experience_retrieval", False)
             and self.config.env.get('use_experience_memory', False)
             and self.tasks
         ):

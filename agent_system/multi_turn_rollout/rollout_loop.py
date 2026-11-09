@@ -433,6 +433,7 @@ class TrajectoryCollector:
         use_edge_distillation = self._is_edge_distillation_enabled(is_train, global_step=global_step)
         experience_injection_mask = self._build_experience_injection_mask_for_rollout(batch_size, is_train, global_step=global_step)
         envs.set_experience_injection_mask(experience_injection_mask)
+        envs.skip_experience_retrieval = not is_train and not self._is_memory_injection_enabled_for_val()
 
         # Initial observations from the environment.  The injection mask must
         # be installed before reset because ALFWorld builds the initial prompt
