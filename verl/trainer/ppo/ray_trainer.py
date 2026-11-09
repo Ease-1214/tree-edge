@@ -1123,6 +1123,59 @@ class RayPPOTrainer:
         except (TypeError, ValueError):
             return np.full(length, default, dtype=np.float32)
 
+    def _baseline_dashboard_metrics(self, batch: DataProto, metrics: dict) -> dict:
+        """T066: EDGE-baseline keys aligned with the tree run's W&B dashboard.
+
+        1_main/pure_noexp_success = success of the experience-free half of each group
+        (no injected experience at any turn = deployment condition), per trajectory.
+        It estimates the same quantity as the tree's all-left leaf, from 4 samples per
+        question instead of 1.
+        """
+        out = {}
+        try:
+            non_tensor = batch.non_tensor_batch
+            scores, _ = self._row_score_vector(batch)
+            traj = non_tensor.get("traj_uid")
+            if traj is None:
+                return out
+            injected = non_tensor.get("experience_injected")
+            sources = non_tensor.get("data_source")
+            per_traj = {}
+            for i in range(len(batch)):
+                key = str(traj[i])
+                if key in per_traj:
+                    continue
+                inj = bool(self._normalise_metadata_bool(injected[i])) if injected is not None else False
+                src = str(sources[i]) if sources is not None else "unknown"
+                per_traj[key] = (float(scores[i]), inj, src)
+            noexp = [v for v in per_traj.values() if not v[1]]
+            if per_traj:
+                out["1_main/leaf_success"] = float(np.mean([v[0] for v in per_traj.values()]))
+            if noexp:
+                out["1_main/pure_noexp_success"] = float(np.mean([v[0] for v in noexp]))
+                for src in sorted({v[2] for v in noexp}):
+                    out["1_main/pure_noexp_success_" + src] = float(np.mean([v[0] for v in noexp if v[2] == src]))
+        except Exception as exc:  # metrics must never break training
+            print(f"[T066] baseline dashboard metrics skipped: {exc!r}")
+        for dest, src in (
+            ("2_exp/bank_size", "experience_management/bank_size"),
+            ("3_kd/active_row_fraction", "edge/active_row_fraction"),
+            ("4_health/grad_norm", "actor/grad_norm"),
+            ("4_health/pg_loss", "actor/pg_loss"),
+            ("4_health/entropy", "actor/entropy_loss"),
+            ("4_health/response_length", "response_length/mean"),
+            ("5_cost/step_seconds", "timing_s/step"),
+        ):
+            value = metrics.get(src)
+            if isinstance(value, (list, tuple)):
+                value = float(np.mean(value)) if len(value) else None
+            if value is not None:
+                try:
+                    out[dest] = float(value)
+                except (TypeError, ValueError):
+                    pass
+        return out
+
     def _row_score_vector(self, batch: DataProto) -> tuple[np.ndarray, str]:
         """Score rows for same-anchor contrasts.
 
@@ -2357,6 +2410,7 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
+                metrics.update(self._baseline_dashboard_metrics(batch, metrics))
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
@@ -2365,4 +2419,5 @@ class RayPPOTrainer:
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    logger.finish()  # flush W&B before Ray shuts workers down
                     return
