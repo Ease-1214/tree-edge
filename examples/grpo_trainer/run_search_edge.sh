@@ -22,12 +22,19 @@ EDGE_TOP_K=${EDGE_TOP_K:-20}
 
 # Credentials are inherited from the caller's environment and are never passed
 # on the command line, where they could be exposed through process listings.
+restore_shell_trace=false
+case "$-" in
+    *x*) restore_shell_trace=true; set +x ;;
+esac
 EXPERIENCE_UPDATE_API_KEY=${EXPERIENCE_UPDATE_API_KEY:-}
 EXPERIENCE_UPDATE_BASE_URL=${EXPERIENCE_UPDATE_BASE_URL:-}
 EXPERIENCE_UPDATE_MODEL=${EXPERIENCE_UPDATE_MODEL:-}
 if [[ "$ENABLE_EXPERIENCE_EVOLUTION" == "true" && ( -z "$EXPERIENCE_UPDATE_API_KEY" || -z "$EXPERIENCE_UPDATE_BASE_URL" || -z "$EXPERIENCE_UPDATE_MODEL" ) ]]; then
     echo "Set EXPERIENCE_UPDATE_API_KEY, EXPERIENCE_UPDATE_BASE_URL, and EXPERIENCE_UPDATE_MODEL to enable experience evolution." >&2
     exit 1
+fi
+if [[ "$restore_shell_trace" == "true" ]]; then
+    set -x
 fi
 if [[ -n "$EXPERIENCE_RETRIEVAL_SERVICE_URL" && "$RETRIEVAL_MODE" != "embedding" ]]; then
     echo "EXPERIENCE_RETRIEVAL_SERVICE_URL requires RETRIEVAL_MODE=embedding." >&2
