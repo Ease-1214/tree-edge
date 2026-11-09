@@ -33,7 +33,7 @@ mkdir -p "$RUN_DIR"
 export PATH=/home/zehao/.conda/envs/tree-edge/bin:/home/zehao/miniforge3/bin:$PATH
 export EDGE_CONTROLLER_GPUS=1
 export CC=/home/zehao/.conda/envs/tree-edge/bin/x86_64-conda-linux-gnu-cc
-export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/ray-$PERF_TAG
+export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/r
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 export ENABLE_EXPERIENCE_EVOLUTION=false ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
