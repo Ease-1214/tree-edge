@@ -213,7 +213,11 @@ def pack_training_rows(collector, tree, rows):
             placeholder = dict(input_ids=node.tensors["input_ids"][:-R].unsqueeze(0), attention_mask=node.tensors["attention_mask"][:-R].unsqueeze(0))
             kd_student.append(placeholder)
             kd_teacher.append(placeholder)
-    non_tensors = {key: object_array(values) for key, values in fields.items()}
+    bool_fields = {"is_action_valid", "active_masks", "path_has_T", "kd_triggered"}
+    numeric_fields = {"step_idx", "rewards", "episode_rewards", "episode_lengths", "tool_callings", "trajectory_success", "success_rate"}
+    non_tensors = {key: np.asarray(values, dtype=bool) if key in bool_fields else
+        np.asarray(values, dtype=np.float32) if key in numeric_fields else object_array(values)
+        for key, values in fields.items()}
     for prefix, prompts in [("kd_student", kd_student), ("edge_teacher", kd_teacher)]:
         ids = torch.cat([torch.cat([p["input_ids"], tensors["responses"][i:i+1]], dim=-1) for i,p in enumerate(prompts)])
         masks = torch.cat([torch.cat([p["attention_mask"], tensors["attention_mask"][i:i+1, -R:]], dim=-1) for i,p in enumerate(prompts)])

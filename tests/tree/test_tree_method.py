@@ -144,6 +144,8 @@ def test_trace_student_teacher_and_shuffled_rows(tmp_path):
         node.tensors=dict(input_ids=torch.cat([prompt,response]),responses=response,attention_mask=mask,position_ids=torch.arange(68),prompts=prompt)
         node.actual_prompt_ids=prompt.tolist();node.response_ids=response.tolist()
     b=pack_training_rows(Collector(tmp_path),t,t.expanded_rows())
+    assert b.non_tensor_batch["is_action_valid"].dtype == np.dtype(bool)
+    assert hasattr(b[0].non_tensor_batch["is_action_valid"],"astype")
     b.batch["response_mask"]=b.batch["attention_mask"][:,-4:]
     b=b.select_idxs(np.array([4,2,0,3,1]))
     result=audit_training_tokens(b,t,1,tmp_path/"trace.json")
