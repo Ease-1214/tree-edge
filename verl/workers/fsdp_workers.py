@@ -191,6 +191,10 @@ class ActorRolloutRefWorker(Worker):
         from verl.utils.torch_dtypes import PrecisionType
 
         assert role in ["actor", "ref"]
+        init_seed = self.config.model.get("init_seed")
+        if init_seed is not None:
+            from transformers import set_seed
+            set_seed(int(init_seed))
 
         log_gpu_memory_usage(f"Before init {role} from HF AutoModel", logger=logger)
         local_path = model_path

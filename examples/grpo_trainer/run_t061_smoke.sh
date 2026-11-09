@@ -23,7 +23,7 @@ export EDGE_SMOKE_AUDIT=1
 export WANDB_BASE_URL=https://api.forge.coreweave.com WANDB_ENTITY=wuzehao1214-sun-yat-sen-university
 cd "$ROOT/EDGE"
 bash examples/grpo_trainer/run_search_edge.sh vllm \
- actor_rollout_ref.model.lora_rank=16 actor_rollout_ref.model.lora_alpha=32 \
+ actor_rollout_ref.model.lora_rank=16 actor_rollout_ref.model.lora_alpha=32 actor_rollout_ref.model.init_seed=0 \
  'actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj]' \
  actor_rollout_ref.actor.optim.lr=5e-6 \
  actor_rollout_ref.model.use_fused_kernels=False \

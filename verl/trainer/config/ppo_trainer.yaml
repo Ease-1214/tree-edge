@@ -27,6 +27,7 @@ data:
 actor_rollout_ref:
   hybrid_engine: True
   model:
+    init_seed: null # Explicitly set by reproducible LoRA profiles.
     path: ~/models/deepseek-llm-7b-chat
     use_shm: False
     external_lib: null
