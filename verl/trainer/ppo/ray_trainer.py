@@ -835,6 +835,7 @@ class RayPPOTrainer:
         traj_uid_list = []
         episode_length_list = []
         response_length_list = []
+        trajectory_reward_list = []
         success_rate_dict = {}
 
         # Lists to collect samples for the table
@@ -858,11 +859,6 @@ class RayPPOTrainer:
             if self.config.reward_model.enable and test_batch[0].non_tensor_batch["reward_model"]["style"] == "model":
                 return {}
 
-            # Store original inputs
-            input_ids = test_batch.batch["input_ids"]
-            # TODO: Can we keep special tokens except for padding tokens?
-            input_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in input_ids]
-            sample_inputs.extend(input_texts)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "data_source"]
@@ -905,10 +901,17 @@ class RayPPOTrainer:
             print('validation generation end')
             del test_batch
             test_batch = test_output_gen_batch
-            # Store generated outputs
-            output_ids = test_output_gen_batch.batch["responses"]
-            output_texts = [self.tokenizer.decode(ids, skip_special_tokens=True) for ids in output_ids]
-            sample_outputs.extend(output_texts)
+            # Match the initial prompt, all actions, and final reward by trajectory.
+            trajectory_rows = defaultdict(list)
+            for index, trajectory in enumerate(test_batch.non_tensor_batch["traj_uid"]):
+                trajectory_rows[trajectory].append(index)
+            for indices in trajectory_rows.values():
+                indices.sort(key=lambda index: test_batch.non_tensor_batch["step_idx"][index])
+                sample_inputs.append(self.tokenizer.decode(test_batch.batch["prompts"][indices[0]], skip_special_tokens=True))
+                sample_outputs.append("\n".join(self.tokenizer.decode(test_batch.batch["responses"][index], skip_special_tokens=True) for index in indices))
+                sample_scores.append(float(test_batch.non_tensor_batch["episode_rewards"][indices[0]]))
+            if self.config.env.env_name == "search":
+                trajectory_reward_list.append(test_batch.non_tensor_batch["episode_rewards"])
 
             # test_batch = test_batch.union(test_output_gen_batch)
 
@@ -916,7 +919,7 @@ class RayPPOTrainer:
             result = self.val_reward_fn(test_batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
-            sample_scores.extend(scores)
+
 
             if val_dump_batches is not None:
                 # attach token_level_scores for this validation batch and stash it
@@ -1030,6 +1033,15 @@ class RayPPOTrainer:
 
         for k, v in success_rate.items():
             metric_dict[f'val/{k}'] = v
+
+        # Search strict EM counts each trajectory once, including a smaller final batch.
+        if self.config.env.env_name == "search":
+            trajectory_rewards = np.concatenate(trajectory_reward_list)[unique_idx]
+            trajectory_success = (trajectory_rewards >= 1.0).astype(float)
+            metric_dict["val/strict_em"] = float(trajectory_success.mean())
+            metric_dict["val/success_rate"] = metric_dict["val/strict_em"]
+            for source in np.unique(unique_data_sources):
+                metric_dict[f"val/{source}_success_rate"] = float(trajectory_success[unique_data_sources == source].mean())
 
         # Experience evolution is intentionally not driven by validation/test
         # trajectories.  Dynamic experience updates happen from training rollouts in

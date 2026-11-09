@@ -489,7 +489,7 @@ class TrajectoryCollector:
 
             batch.non_tensor_batch['uid'] = uid_batch
             batch.non_tensor_batch['traj_uid'] = traj_uid
-            if use_exp_rollout or attach_management_mask:
+            if experience_injection_mask is not None:
                 batch.non_tensor_batch['experience_injected'] = experience_injection_mask
             if use_exp_rollout:
                 batch.non_tensor_batch['grpo_uid'] = np.array([
