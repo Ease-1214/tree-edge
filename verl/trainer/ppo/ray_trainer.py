@@ -2390,6 +2390,9 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
+                if self.config.env.get("tree_experience", {}).get("enable", False):
+                    from agent_system.tree.metrics import dashboard_metrics
+                    metrics.update(dashboard_metrics(metrics))
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 

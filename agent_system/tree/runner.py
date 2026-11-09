@@ -334,6 +334,7 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
         "tree/active_rows_peak": peak,
         "tree/rollout_tokens": generated_tokens,
         "tree/search_calls": search_calls,
+        "tree/search_calls_per_question": search_calls / max(1, len(questions)),
         "gate/fork_count": len(tree.forks),
         "gate/trigger_count": sum(x["gate"] for x in tree.audits),
         "gate/same_action_skip_rate": (
