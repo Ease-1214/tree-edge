@@ -129,7 +129,17 @@ class Tracking:
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self):
+        """Explicit flush/close; __del__ is not reliably reached when Ray tears down."""
+        if getattr(self, "_finished", False):
+            return
+        self._finished = True
+        self.__del__()
+
     def __del__(self):
+        if getattr(self, "_finished_del", False):
+            return
+        self._finished_del = True
         if "wandb" in self.logger:
             self.logger["wandb"].finish(exit_code=0)
         if "swanlab" in self.logger:

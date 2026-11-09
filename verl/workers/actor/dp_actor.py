@@ -781,7 +781,8 @@ class DataParallelPPOActor(BasePPOActor):
                                     teacher_topk_ids, responses, advantages)
                                 edge_metrics.update({"kd/weighted_loss_all_tokens":float(edge_loss.detach()),
                                     "kd/active_token_rate":float((response_mask*(data["edge_distill_weight"]>0).unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
-                                    "kd/effective_weight_sum_over_N":float((response_mask*data["edge_distill_weight"].unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1))})
+                                    "kd/effective_weight_sum_over_N":float((response_mask*data["edge_distill_weight"].unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
+                                    "kd/to_pg_abs_ratio":float(edge_cfg.get("coef", 1.0)*edge_loss.detach().abs()/(pg_loss.detach().abs()+1e-6))})
                             else:
                                 edge_loss = log_prob.sum()*0
                                 edge_metrics = {"kd/weighted_loss_all_tokens":0., "kd/active_token_rate":0.}

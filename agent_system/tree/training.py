@@ -122,6 +122,18 @@ def manage_tree_experiences(trainer, tree):
     )
     metrics["bank/deleted_capacity"] = len(capacity["removed"])
     metrics["bank/size"] = len(memory)
+    utilities = [
+        float(x.get("utility", 0.0))
+        for pool in ("task_experiences", "step_experiences")
+        for x in memory.experiences.get(pool, [])
+    ]
+    if utilities:
+        metrics["bank/utility_mean"] = statistics.mean(utilities)
+        metrics["bank/utility_std"] = statistics.pstdev(utilities)
+        metrics["bank/utility_max"] = max(utilities)
+        metrics["bank/utility_min"] = min(utilities)
+        metrics["bank/utility_positive_rate"] = statistics.mean(u > 0 for u in utilities)
+    metrics["bank/reflector_allowed"] = float(bool(contrasts and allowed))
     root = Path(trainer.config.trainer.default_local_dir)
     record = dict(
         step=step,

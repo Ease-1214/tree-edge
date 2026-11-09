@@ -2398,4 +2398,5 @@ class RayPPOTrainer:
                 if is_last_step:
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    logger.finish()  # flush W&B before Ray shuts workers down
                     return
