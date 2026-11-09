@@ -1,3 +1,4 @@
+from pathlib import Path
 # Copyright 2024 Bytedance Ltd. and/or its affiliates
 # Copyright 2023-2024 SGLang Team
 # Copyright 2025 ModelBest Inc. and/or its affiliates
@@ -1949,6 +1950,9 @@ class RayPPOTrainer:
         dataloader_state_dict = self.train_dataloader.state_dict()
         torch.save(dataloader_state_dict, dataloader_local_path)
 
+        from agent_system.tree.training import save_tree_checkpoint
+        save_tree_checkpoint(self, local_global_step_folder)
+
         # latest checkpointed iteration tracker (for atomic usage)
         if update_latest_tracker:
             local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
@@ -2075,6 +2079,8 @@ class RayPPOTrainer:
 
         # load checkpoint before doing anything
         self._load_checkpoint()
+        from agent_system.tree.training import restore_tree_state
+        restore_tree_state(self)
         self._load_best_checkpoint_score()
         if self.config.env.get("use_experience_memory", False):
             retrieval_memory = getattr(self.envs, "retrieval_memory", None)
@@ -2163,7 +2169,16 @@ class RayPPOTrainer:
                     del batch
                     batch = gen_batch_output
 
-                    if self._is_dynamic_experience_management_enabled():
+                    tree_mode = bool(batch.meta_info.get("tree_mode", False))
+                    tree_configured = bool(self.config.env.get("tree_experience", {}).get("enable", False))
+                    if tree_mode:
+                        from agent_system.tree.training import manage_tree_experiences
+                        with _timer("experience_management", timing_raw):
+                            metrics.update(manage_tree_experiences(self, self.traj_collector.last_tree))
+                    elif tree_configured:
+                        metrics.update({"tree/mode": 0., "bank/added": 0., "bank/deleted_negative": 0.,
+                            "bank/deleted_capacity": 0., "kd/canonical_rows": 0., "perf/edge_teacher_row_fraction": 0.})
+                    elif self._is_dynamic_experience_management_enabled():
                         # This must run before adjust_batch/balance_batch while
                         # rollout uid/traj_uid and exp-rollout A/B metadata are
                         # still intact.  Validation never invokes this hook.
@@ -2183,6 +2198,14 @@ class RayPPOTrainer:
                     batch = adjust_batch(self.config, batch)
 
                     batch.batch["response_mask"] = compute_response_mask(batch)
+                    if tree_mode:
+                        batch.batch["response_mask"] *= (~batch.batch["is_padding_copy"]).unsqueeze(-1)
+                        metrics["actor/real_rows"] = float((~batch.batch["is_padding_copy"]).sum())
+                        metrics["actor/padded_rows"] = float(batch.batch["is_padding_copy"].sum())
+                    else:
+                        metrics["actor/real_rows"] = float(len(batch))
+                        metrics["actor/padded_rows"] = 0.
+                    metrics["actor/effective_mini_batch_rows_global"] = self.config.actor_rollout_ref.actor.ppo_mini_batch_size
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
                     # Please take care when you implement group based adv computation such as GRPO and rloo
@@ -2283,26 +2306,36 @@ class RayPPOTrainer:
 
                         norm_adv_by_std_in_grpo = self.config.algorithm.get("norm_adv_by_std_in_grpo", True)  # GRPO adv normalization factor
 
-                        batch = compute_advantage(
-                            batch,
-                            adv_estimator=self.config.algorithm.adv_estimator,
-                            gamma=self.config.algorithm.gamma,
-                            lam=self.config.algorithm.lam,
-                            num_repeat=self.config.actor_rollout_ref.rollout.n,
-                            norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
-                            multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
-                            use_pf_ppo=self.config.algorithm.use_pf_ppo,
-                            pf_ppo_reweight_method=self.config.algorithm.pf_ppo.reweight_method,
-                            pf_ppo_weight_pow=self.config.algorithm.pf_ppo.weight_pow,
-                            step_advantage_w=self.config.algorithm.gigpo.step_advantage_w,
-                            gigpo_mode=self.config.algorithm.gigpo.mode,
-                            gigpo_enable_similarity= self.config.algorithm.gigpo.enable_similarity,
-                            gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
-                        )
+                        if tree_mode:
+                            batch.batch["advantages"] = batch.batch["tree_advantage"].unsqueeze(-1) * batch.batch["response_mask"]
+                            batch.batch["returns"] = batch.batch["advantages"].clone()
+                        else:
+                            batch = compute_advantage(
+                                batch,
+                                adv_estimator=self.config.algorithm.adv_estimator,
+                                gamma=self.config.algorithm.gamma,
+                                lam=self.config.algorithm.lam,
+                                num_repeat=self.config.actor_rollout_ref.rollout.n,
+                                norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
+                                multi_turn=self.config.actor_rollout_ref.rollout.multi_turn.enable,
+                                use_pf_ppo=self.config.algorithm.use_pf_ppo,
+                                pf_ppo_reweight_method=self.config.algorithm.pf_ppo.reweight_method,
+                                pf_ppo_weight_pow=self.config.algorithm.pf_ppo.weight_pow,
+                                step_advantage_w=self.config.algorithm.gigpo.step_advantage_w,
+                                gigpo_mode=self.config.algorithm.gigpo.mode,
+                                gigpo_enable_similarity= self.config.algorithm.gigpo.enable_similarity,
+                                gigpo_similarity_thresh=self.config.algorithm.gigpo.similarity_thresh,
+                            )
 
-                        if self._is_edge_distillation_enabled():
+                        if not tree_mode and self._is_edge_distillation_enabled():
                             batch, edge_metrics = self._compute_edge_distillation_weights(batch)
                             metrics.update(edge_metrics)
+
+                    if tree_mode:
+                        from agent_system.tree.runner import audit_training_tokens
+                        trace_dir = Path(self.config.trainer.default_local_dir).parent / "tree-private"
+                        metrics.update(audit_training_tokens(batch, self.traj_collector.last_tree,
+                            self.global_steps, trace_dir / f"token-audit-step{self.global_steps}.json"))
 
                     # update critic
                     if self.use_critic:

@@ -60,6 +60,11 @@ class ExperienceUpdater:
         domain = self._prompt_domain(current_experiences)
         if domain == "search":
             prompt = self._build_search_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+            if any(traj.get("fork_id") for traj in failed_trajectories):
+                old_description = "Each example below is a contrast on the SAME question and the SAME turn: the rollout that received the listed experiences failed, while the rollout without any experience succeeded. So the injected experience either misled the agent or failed to prevent a mistake."
+                new_description = "Each example is a fork at one identical search state. LEFT omits only this turn's new experiences; RIGHT adds them. Both sides may retain earlier task experience. The actions shown are this turn's real actions; scores are terminal subtree success fractions. Delta=RIGHT-LEFT can show helped, harmed, or neutral evidence. Distill a reusable strategy from either sign without treating a noisy fork as certain causality."
+                prompt = prompt.replace(old_description, new_description)
+                prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience.")
         else:
             prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
         self.last_prompt_domain = domain
@@ -265,6 +270,19 @@ Return ONLY a JSON array of experience objects.
         return table
 
     def _format_search_example(self, idx: int, traj: Dict, lookup: Dict[str, Dict]) -> str:
+        if traj.get("fork_id"):
+            pair = traj["paired_rollout"]
+            return "\n".join([
+                f"\nExample {idx}:", f"Question: {traj.get('task', '')}",
+                f"Fork ID: {traj['fork_id']}",
+                "Search history before fork: " + json.dumps(traj.get("search_history", []), ensure_ascii=False),
+                "New experiences at this fork: " + json.dumps(traj.get("added_experiences", []), ensure_ascii=False),
+                f"LEFT action: {pair['without_experience'].get('action', '')}",
+                f"RIGHT action: {pair['with_experience'].get('action', '')}",
+                f"LEFT subtree success: {pair['without_experience'].get('score')}",
+                f"RIGHT subtree success: {pair['with_experience'].get('score')}",
+                f"Delta: {traj['delta']}; experience {traj['effect']}",
+            ]) + "\n"
         pair = traj.get("paired_rollout", {}) or {}
         with_exp = pair.get("with_experience", {}) or {}
         without_exp = pair.get("without_experience", {}) or {}
@@ -370,9 +388,12 @@ Return ONLY a JSON array of experience objects.
                     traj = failed_trajectories[int(n) - 1]
                 except (ValueError, TypeError, IndexError):
                     continue
-                for key in ("traj_uid", "no_exp_traj_uid"):
-                    if traj.get(key):
-                        sources.append(str(traj[key]))
+                if traj.get("source_leaf_ids"):
+                    sources.extend(str(x) for x in traj["source_leaf_ids"])
+                else:
+                    for key in ("traj_uid", "no_exp_traj_uid"):
+                        if traj.get(key):
+                            sources.append(str(traj[key]))
             exp["evidence"] = {
                 "positive_gain_count": 0,
                 "negative_gain_count": 0,

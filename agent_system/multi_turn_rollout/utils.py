@@ -120,9 +120,14 @@ def adjust_batch(config, data: DataProto, mode="copy") -> DataProto:
         del data
     elif mode == "copy":
         to_add = size_divisor - remainder
-        dup_indices = np.random.choice(bs, to_add, replace=False)
+        dup_indices = np.random.choice(bs, to_add, replace=to_add > bs)
         dup_proto = data.select_idxs(dup_indices)
 
+        if "is_padding_copy" in dup_proto.batch:
+            dup_proto.batch["is_padding_copy"][:] = True
+            dup_proto.batch["kd_canonical"][:] = False
+            dup_proto.batch["kd_weight"][:] = 0
+            dup_proto.batch["edge_distill_weight"][:] = 0
         adjusted_batch = DataProto.concat([data, dup_proto])
     else:
         raise ValueError(f"Unsupported mode: {mode}")

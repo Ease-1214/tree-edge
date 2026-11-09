@@ -171,6 +171,11 @@ class DataParallelPPOActor(BasePPOActor):
                 sel_ids_kept = token_selection_ids[row_idx, resp_idx]
                 sel_logits_kept = logits.gather(dim=-1, index=sel_ids_kept)
 
+        if sel_logits_kept is not None and getattr(self, "_tree_monitoring", False):
+            with torch.no_grad():
+                mass_kept = torch.exp(torch.logsumexp(sel_logits_kept.float(), -1) - torch.logsumexp(logits.float(), -1))
+                self._last_selected_mass = torch.zeros((batch_size, response_length), device=device).index_put((row_idx, resp_idx), mass_kept)
+
         if calculate_log_probs:
             inplace_backward = not (calculate_entropy or token_selection_top_k is not None)
             lp_kept = logprobs_from_logits(logits=logits, labels=labels, inplace_backward=inplace_backward)
@@ -612,6 +617,11 @@ class DataParallelPPOActor(BasePPOActor):
             select_keys.extend(EDGE_DISTILLATION_BATCH_KEYS)
         elif edge_distillation_requested:
             logger.warning("EDGE distillation skipped because batch is missing keys: %s", edge_missing_keys)
+        tree_batch = "kd_student_input_ids" in data.batch
+        if tree_batch:
+            select_keys.extend(["kd_student_input_ids", "kd_student_attention_mask", "kd_student_position_ids",
+                "kd_canonical", "kd_path_has_T", "is_padding_copy"])
+        self._tree_monitoring = tree_batch
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
 
@@ -625,6 +635,7 @@ class DataParallelPPOActor(BasePPOActor):
             dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
+        micro_batch_count = 0
         if edge_distillation_requested:
             append_to_dict(metrics, {"edge/skipped_missing_inputs": float(bool(edge_missing_keys))})
         for epoch in range(self.config.ppo_epochs):
@@ -646,6 +657,7 @@ class DataParallelPPOActor(BasePPOActor):
                 self.actor_optimizer.zero_grad()
 
                 for data in micro_batches:
+                    micro_batch_count += 1
                     # Support all hardwares
                     if isinstance(data, DataProto):
                         data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
@@ -659,6 +671,11 @@ class DataParallelPPOActor(BasePPOActor):
                     else:
                         response_mask = attention_mask[:, -response_length:]
 
+                    if tree_batch:
+                        response_mask = response_mask * (~data["is_padding_copy"]).unsqueeze(-1)
+                        data["edge_distill_weight"] *= data["kd_canonical"] * (~data["is_padding_copy"])
+                        if int(edge_cfg.get("path_tier", 2)) == 1:
+                            data["edge_distill_weight"] *= ~data["kd_path_has_T"]
                     old_log_prob = data["old_log_probs"]
                     advantages = data["advantages"]
 
@@ -671,7 +688,8 @@ class DataParallelPPOActor(BasePPOActor):
 
                     teacher_topk_logits = None
                     teacher_topk_ids = None
-                    if edge_distillation_enabled and edge_token_selection == "teacher_topk":
+                    active_tree_kd = tree_batch and bool((data["edge_distill_weight"] > 0).any())
+                    if edge_distillation_enabled and edge_token_selection == "teacher_topk" and (not tree_batch or active_tree_kd):
                         # Same actor module under no_grad, evaluated before the student,
                         # but only on rows the gate activated (weight > 0): every other row
                         # is masked out of the distillation loss, so its teacher pass is waste.
@@ -691,6 +709,24 @@ class DataParallelPPOActor(BasePPOActor):
                         token_selection_ids=teacher_topk_ids,
                     )
                     
+                    if tree_batch and active_tree_kd:
+                        tree_student_logits = student_topk_logits
+                        tree_student_mass = self._last_selected_mass
+                        tree_gap = torch.zeros_like(log_prob)
+                        extra = ((data["edge_distill_weight"] > 0) & data["kd_path_has_T"]).nonzero(as_tuple=True)[0]
+                        if extra.numel():
+                            noexp = {
+                                "input_ids": data["kd_student_input_ids"].index_select(0,extra),
+                                "attention_mask": data["kd_student_attention_mask"].index_select(0,extra),
+                                "position_ids": data["kd_student_position_ids"].index_select(0,extra),
+                                "responses": responses.index_select(0,extra),
+                            }
+                            _, noexp_lp, noexp_logits, _ = self._forward_micro_batch(noexp, temperature,
+                                token_selection_top_k=edge_top_k, token_selection_ids=teacher_topk_ids.index_select(0,extra))
+                            tree_student_logits = student_topk_logits.index_copy(0,extra,noexp_logits)
+                            tree_student_mass = tree_student_mass.index_copy(0,extra,self._last_selected_mass)
+                            tree_gap = tree_gap.index_copy(0,extra,log_prob.index_select(0,extra)-noexp_lp)
+
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     if loss_mode == "vanilla":
                         policy_loss_fn = compute_policy_loss
@@ -730,7 +766,21 @@ class DataParallelPPOActor(BasePPOActor):
                         metrics["actor/kl_coef"] = self.config.kl_loss_coef
 
                     if edge_distillation_enabled:
-                        if edge_token_selection == "teacher_topk":
+                        if tree_batch:
+                            if active_tree_kd:
+                                from agent_system.tree.loss import tree_topk_loss, tree_kd_metrics
+                                edge_loss, tree_kl, tree_gradient = tree_topk_loss(tree_student_logits,
+                                    teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask)
+                                edge_metrics = tree_kd_metrics(tree_kl, tree_student_mass, data["edge_distill_weight"],
+                                    response_mask, data["kd_path_has_T"], tree_gap, tree_gradient,
+                                    teacher_topk_ids, responses, advantages)
+                                edge_metrics.update({"kd/weighted_loss_all_tokens":float(edge_loss.detach()),
+                                    "kd/active_token_rate":float((response_mask*(data["edge_distill_weight"]>0).unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
+                                    "kd/effective_weight_sum_over_N":float((response_mask*data["edge_distill_weight"].unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1))})
+                            else:
+                                edge_loss = log_prob.sum()*0
+                                edge_metrics = {"kd/weighted_loss_all_tokens":0., "kd/active_token_rate":0.}
+                        elif edge_token_selection == "teacher_topk":
                             edge_loss, edge_metrics = compute_edge_teacher_topk_distillation_loss(
                                 student_topk_logits=student_topk_logits,
                                 teacher_topk_logits=teacher_topk_logits,
@@ -776,4 +826,6 @@ class DataParallelPPOActor(BasePPOActor):
             metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
             self._edge_teacher_rows = self._edge_teacher_rows_total = 0
         metrics["actor/optimizer_steps_per_train_step"] = [self._optimizer_steps_this_update]
+        metrics["actor/effective_minibatch_rows_per_rank"] = self.config.ppo_mini_batch_size
+        metrics["actor/micro_batch_count"] = micro_batch_count
         return metrics
