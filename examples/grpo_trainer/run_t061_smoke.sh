@@ -7,7 +7,7 @@ export CC=/home/zehao/.conda/envs/tree-edge/bin/x86_64-conda-linux-gnu-cc
 export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/ray-smoke
 export ENABLE_EXPERIENCE_EVOLUTION=false ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
 export MODEL_PATH=/home/zehao/Tree-GRPO/model/Qwen2.5-3B-Instruct
-export TRAIN_DATA=$ROOT/data/train.parquet VAL_DATA=$ROOT/data/validation.parquet
+export TRAIN_DATA=$ROOT/data/train.parquet VAL_DATA=$ROOT/data/validation-v2.parquet
 export EMBEDDING_MODEL=$ROOT/assets/Qwen3-Embedding-0.6B
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SEARCH_URL=http://127.0.0.1:29661/retrieve

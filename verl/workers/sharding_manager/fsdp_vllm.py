@@ -272,6 +272,15 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     lora_tensors=updated_params,
                 )
                 self.inference_engine.llm_engine.add_lora(lora_reqest)
+                loaded_ids = set(self.inference_engine.llm_engine.list_loras())
+                if loaded_ids != {lora_int_id}:
+                    raise RuntimeError(f"Expected only current LoRA {lora_int_id}, got {loaded_ids}")
+                import hashlib
+                checksum = hashlib.sha256()
+                for name, tensor in sorted(updated_params.items()):
+                    checksum.update(name.encode())
+                    checksum.update(tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes())
+                print(f"T061_LORA_SYNC id={lora_int_id} tensors={len(updated_params)} sha256={checksum.hexdigest()}", flush=True)
                 logger.info(f"vLLM load weights, loaded_params: {len(updated_params)}")
                 return
             else:
