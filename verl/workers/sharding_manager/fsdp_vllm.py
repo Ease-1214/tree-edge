@@ -129,7 +129,17 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     with FSDP.summon_full_params(self.module, writeback=False):
                         if self.base_sync_done:
                             lora_params = get_peft_model_state_dict(self.module._fsdp_wrapped_module)
-                            lora_params = {name: param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu() 
+                            if not lora_params:
+                                # PEFT structural filtering does not normalize nested FSDP prefixes.
+                                config = self.module._fsdp_wrapped_module.peft_config["default"]
+                                if config.bias != "none" or config.use_dora:
+                                    raise RuntimeError("Direct FSDP export requires standard bias-free LoRA")
+                                lora_params = {
+                                    name.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight"): param
+                                    for name, param in self.module.named_parameters()
+                                    if name.endswith((".lora_A.default.weight", ".lora_B.default.weight"))
+                                }
+                            lora_params = {name: param.full_tensor().detach().cpu() if hasattr(param, 'full_tensor') else param.detach().cpu()
                                         for name, param in lora_params.items()}
                         else:
                             model = self.module._fsdp_wrapped_module.base_model.model
