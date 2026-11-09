@@ -316,12 +316,10 @@ env:
   use_experience_memory: False
   tree_experience:
     enable: False
-    experience_warmup_steps: 100
-    continue_experience_after_warmup: False
     task_top_k: 4
     step_top_k: 6
     utility_update_interval: 5
-    utility_ema_beta: 0.1
+    utility_ema_beta: 0.3
     min_delete_questions: 20
     protect_recent_steps: 20
   experience_memory:

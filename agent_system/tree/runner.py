@@ -126,8 +126,12 @@ def tree_progress_metrics(tree):
             pure[leaf.uid] = leaf.reward
             pure_by_src[leaf.data_source].append(leaf.reward)
     if by_q:
-        out["success/leaf_mean"] = statistics.mean(statistics.mean(v) for v in by_q.values())
-        out["success/question_any"] = statistics.mean(float(max(v) > 0) for v in by_q.values())
+        out["success/leaf_mean"] = statistics.mean(
+            statistics.mean(v) for v in by_q.values()
+        )
+        out["success/question_any"] = statistics.mean(
+            float(max(v) > 0) for v in by_q.values()
+        )
     if pure:
         out["success/pure_noexp"] = statistics.mean(pure.values())
         for src, values in pure_by_src.items():
@@ -143,14 +147,26 @@ def tree_progress_metrics(tree):
             out[prefix + "delta_mean"] = statistics.mean(deltas)
             out[prefix + "helped_rate"] = statistics.mean(d > 0 for d in deltas)
             out[prefix + "harmed_rate"] = statistics.mean(d < 0 for d in deltas)
-        out[prefix + "gate_rate"] = statistics.mean(a["gate"] for a in audits) if audits else 0.0
+        out[prefix + "gate_rate"] = (
+            statistics.mean(a["gate"] for a in audits) if audits else 0.0
+        )
 
     audits = tree.audits
     ab(audits, "exp_ab/all/")
     ab([a for a in audits if tree.forks[a["fork_id"]].depth == 1], "exp_ab/task_T/")
     ab([a for a in audits if tree.forks[a["fork_id"]].depth > 1], "exp_ab/step_S/")
-    ab([a for a in audits if tree.forks[a["fork_id"]].depth > 1 and a["path_has_T"]], "exp_ab/step_S_under_T/")
-    ab([a for a in audits if tree.forks[a["fork_id"]].depth > 1 and not a["path_has_T"]], "exp_ab/step_S_no_T/")
+    ab(
+        [a for a in audits if tree.forks[a["fork_id"]].depth > 1 and a["path_has_T"]],
+        "exp_ab/step_S_under_T/",
+    )
+    ab(
+        [
+            a
+            for a in audits
+            if tree.forks[a["fork_id"]].depth > 1 and not a["path_has_T"]
+        ],
+        "exp_ab/step_S_no_T/",
+    )
 
     counts = Counter(eid for a in audits for eid in a["new_experience_ids"])
     if counts:
@@ -158,7 +174,9 @@ def tree_progress_metrics(tree):
         ranked = sorted(counts.values(), reverse=True)
         out["retrieval/unique_experiences"] = float(len(counts))
         out["retrieval/top5_share"] = sum(ranked[:5]) / total
-        out["retrieval/top10pct_share"] = sum(ranked[: max(1, len(ranked) // 10)]) / total
+        out["retrieval/top10pct_share"] = (
+            sum(ranked[: max(1, len(ranked) // 10)]) / total
+        )
     return out
 
 

@@ -425,8 +425,7 @@ class TrajectoryCollector:
         experience_injection_mask = self._build_experience_injection_mask_for_rollout(batch_size, is_train, global_step=global_step)
         envs.set_experience_injection_mask(experience_injection_mask)
         from agent_system.tree.core import tree_enabled
-        ordinary_tree_stage = self.config.env.get("tree_experience", {}).get("enable", False) and not tree_enabled(self.config, global_step or 0)
-        envs.skip_experience_retrieval = ordinary_tree_stage or (not is_train and not self._is_memory_injection_enabled_for_val())
+        envs.skip_experience_retrieval = not is_train and not self._is_memory_injection_enabled_for_val()
 
         # Initial observations from the environment.  The injection mask must
         # be installed before reset because ALFWorld builds the initial prompt
@@ -642,17 +641,9 @@ class TrajectoryCollector:
             DataProto: Final collected trajectory data with metadata.
         """
         from agent_system.tree.core import tree_enabled
-        tree_cfg = self.config.env.get("tree_experience", {})
         if is_train and tree_enabled(self.config, gen_batch.meta_info.get("global_step", 0)):
             from agent_system.tree.runner import tree_multi_turn_loop
             return tree_multi_turn_loop(self, gen_batch, actor_rollout_wg, envs)
-        if is_train and tree_cfg.get("enable", False) and self.config.env.rollout.n != 8:
-            from agent_system.environments.env_package.search.envs import build_search_envs
-            envs.envs.close()
-            envs.envs = build_search_envs(seed=self.config.env.seed,
-                env_num=self.config.data.train_batch_size, group_n=8, is_train=True, env_config=self.config.env)
-            self.config.env.rollout.n = 8
-            print("TREE_PHASE_SWITCH ordinary_G8 no_experience", flush=True)
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
             

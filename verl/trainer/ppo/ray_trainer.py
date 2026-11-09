@@ -2394,6 +2394,10 @@ class RayPPOTrainer:
                     from agent_system.tree.metrics import dashboard_metrics
                     metrics.update(dashboard_metrics(metrics))
                 # TODO: make a canonical logger that supports various backend
+                if self.config.env.get("tree_experience", {}).get("enable", False):
+                    import json
+                    with open(Path(self.config.trainer.default_local_dir).parent / "step_metrics.jsonl", "a") as handle:
+                        handle.write(json.dumps(metrics, default=lambda value: float(value))+"\n")
                 logger.log(data=metrics, step=self.global_steps)
 
                 progress_bar.update(1)

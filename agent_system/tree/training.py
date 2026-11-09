@@ -6,7 +6,11 @@ from pathlib import Path
 import json
 import os
 import statistics
-from agent_system.tree.core import QuestionEvidence, fork_reflector_examples
+from agent_system.tree.core import (
+    QuestionEvidence,
+    fork_reflector_examples,
+    select_reflector_examples,
+)
 
 
 def atomic_json(path, data):
@@ -65,6 +69,12 @@ def manage_tree_experiences(trainer, tree):
             "bank/added": 0.0,
             "bank/deleted_negative": 0.0,
             "bank/deleted_capacity": 0.0,
+            "reflector/candidates_positive": 0,
+            "reflector/candidates_negative": 0,
+            "reflector/submitted": 0,
+            "reflector/added_task": 0,
+            "reflector/added_step": 0,
+            "reflector/skip_reason": 3,
         },
     )
     interval = int(cfg.utility_update_interval)
@@ -82,9 +92,9 @@ def manage_tree_experiences(trainer, tree):
     memory.replace_experiences_keep_cache_incremental(bank)
     metrics["bank/utility_updates"] = len(updates)
     metrics["bank/deleted_negative"] = len(negative)
-    contrasts = sorted(
-        evidence.state["contrasts"], key=lambda x: (-abs(x["delta"]), x["fork_id"])
-    )[:10]
+    contrasts = select_reflector_examples(evidence.state["contrasts"])
+    metrics["reflector/candidates_positive"] = sum(x["delta"] > 0 for x in contrasts)
+    metrics["reflector/candidates_negative"] = sum(x["delta"] < 0 for x in contrasts)
     rates = defaultdict(list)
     for leaf in tree.leaves:
         rates[leaf.data_source].append(leaf.reward)
@@ -93,7 +103,9 @@ def manage_tree_experiences(trainer, tree):
         < float(trainer.config.env.experience_memory.update_threshold)
         for x in rates.values()
     )
+    metrics["reflector/skip_reason"] = 1 if not contrasts else 2 if not allowed else 0
     if contrasts and allowed:
+        metrics["reflector/submitted"] = len(contrasts)
         if not hasattr(trainer, "experience_updater"):
             from agent_system.memory.experience_updater import ExperienceUpdater
 
@@ -108,10 +120,15 @@ def manage_tree_experiences(trainer, tree):
         additions = trainer.experience_updater.analyze_failures(
             contrasts, memory.experiences
         )
-        for item in additions:
-            item["created_at_step"] = step
-            item.setdefault("evidence", {})["last_updated_step"] = step
-        metrics["bank/added"] = memory.upsert_experiences(additions)
+        failures = evidence.state.get("reflector_failed_windows", 0)
+        evidence.state["reflector_failed_windows"] = (
+            0 if trainer.experience_updater.last_update_succeeded else failures + 1
+        )
+        if evidence.state["reflector_failed_windows"] >= 2:
+            raise RuntimeError(
+                "Reflector failed to parse two consecutive update windows"
+            )
+        metrics.update(write_new_experiences(memory, additions, step))
     evidence.state["contrasts"] = []
     capacity = memory.evict_excess_experiences(
         step,
@@ -132,7 +149,9 @@ def manage_tree_experiences(trainer, tree):
         metrics["bank/utility_std"] = statistics.pstdev(utilities)
         metrics["bank/utility_max"] = max(utilities)
         metrics["bank/utility_min"] = min(utilities)
-        metrics["bank/utility_positive_rate"] = statistics.mean(u > 0 for u in utilities)
+        metrics["bank/utility_positive_rate"] = statistics.mean(
+            u > 0 for u in utilities
+        )
     metrics["bank/reflector_allowed"] = float(bool(contrasts and allowed))
     root = Path(trainer.config.trainer.default_local_dir)
     record = dict(
@@ -150,3 +169,38 @@ def manage_tree_experiences(trainer, tree):
         memory, path=str(root / f"experience_bank_step{step}.json")
     )
     return metrics
+
+
+def write_new_experiences(memory, additions, step):
+    groups = {"task": [], "step": []}
+    for index, item in enumerate(additions):
+        kind = item["experience_type"]
+        clean = memory._legacy_experience_to_step_experience(item, index + 1)
+        clean.pop("experience_id", None)
+        clean.update(
+            utility=0.0,
+            retrieval_count=0,
+            last_retrieval_step=None,
+            created_at_step=step,
+        )
+        clean["evidence"] = dict(
+            positive_gain_count=0,
+            negative_gain_count=0,
+            source_traj_uids=item.get("evidence", {}).get("source_traj_uids", []),
+            last_updated_step=step,
+        )
+        groups[kind].append(clean)
+    before = {
+        pool: len(memory.experiences.get(pool, []))
+        for pool in ("task_experiences", "step_experiences")
+    }
+    added = memory.upsert_experience_groups(
+        task_experiences=groups["task"], step_experiences=groups["step"]
+    )
+    return {
+        "bank/added": added,
+        "reflector/added_task": len(memory.experiences["task_experiences"])
+        - before["task_experiences"],
+        "reflector/added_step": len(memory.experiences["step_experiences"])
+        - before["step_experiences"],
+    }

@@ -11,10 +11,7 @@ import statistics
 
 def tree_enabled(config, step):
     cfg = config.env.get("tree_experience", {})
-    return bool(cfg.get("enable", False)) and (
-        bool(cfg.get("continue_experience_after_warmup", False))
-        or int(step) <= int(cfg.get("experience_warmup_steps", 100))
-    )
+    return bool(cfg.get("enable", False))
 
 
 @dataclass
@@ -286,7 +283,12 @@ class QuestionEvidence:
 def fork_reflector_examples(tree):
     examples = []
     for audit in tree.audits:
-        if audit["same_action"] or not audit["informative"]:
+        if audit["same_action"] or not (
+            max(audit["left_rewards"]) == 0
+            and max(audit["right_rewards"]) == 1
+            or max(audit["right_rewards"]) == 0
+            and max(audit["left_rewards"]) == 1
+        ):
             continue
         left = tree.nodes[audit["left_node_id"]]
         right = tree.nodes[audit["right_node_id"]]
@@ -294,6 +296,13 @@ def fork_reflector_examples(tree):
         examples.append(
             dict(
                 task=state.question,
+                question_id=hashlib.sha256(
+                    (state.data_source + "\0" + state.question).encode()
+                ).hexdigest(),
+                fork_depth=left.depth,
+                common_task_experience=(
+                    deepcopy(state.task_memory) if left.depth > 1 else {}
+                ),
                 task_type="unknown",
                 anchor_obs=state.last_observation,
                 search_history=deepcopy(state.history),
@@ -317,13 +326,24 @@ def fork_reflector_examples(tree):
                     "with_experience": {
                         "action": right.action,
                         "score": statistics.mean(audit["right_rewards"]),
+                        "successes": sum(audit["right_rewards"]),
+                        "total": len(audit["right_rewards"]),
                         "experience_ids": audit["new_experience_ids"],
                     },
                     "without_experience": {
                         "action": left.action,
                         "score": statistics.mean(audit["left_rewards"]),
+                        "successes": sum(audit["left_rewards"]),
+                        "total": len(audit["left_rewards"]),
                     },
                 },
             )
         )
-    return sorted(examples, key=lambda x: (-abs(x["delta"]), x["fork_id"]))[:10]
+    return examples
+
+
+def select_reflector_examples(examples):
+    selected = {}
+    for item in sorted(examples, key=lambda x: (-abs(x["delta"]), x["fork_id"])):
+        selected.setdefault(item["question_id"], item)
+    return list(selected.values())[:10]

@@ -151,14 +151,11 @@ def test_negative_deletion_and_recent_protection():
     assert len(e.merge_window(bank, 40, protect_recent_steps=20)[1]) == 1
 
 
-def test_warmup_boundaries():
-    cfg = OmegaConf.create(
-        {"env": {"tree_experience": {"enable": True, "experience_warmup_steps": 100}}}
-    )
-    assert tree_enabled(cfg, 100) and not tree_enabled(cfg, 101)
-    cfg.env.tree_experience.continue_experience_after_warmup = True
-    assert tree_enabled(cfg, 101)
-    assert 256 * 1 // 4 == 64
+def test_full_training_tree_enabled():
+    cfg=OmegaConf.create({"env":{"tree_experience":{"enable":True}}})
+    assert all(tree_enabled(cfg, step) for step in (1,100,101,200))
+    cfg.env.tree_experience.enable=False
+    assert not tree_enabled(cfg,1)
 
 
 def test_reflector_both_signs_and_provenance():

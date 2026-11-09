@@ -17,8 +17,6 @@ export WANDB_NAME=t065-merged-smoke
 exec bash examples/grpo_trainer/run_t062_perf.sh \
  env.rollout.n=1 \
  env.tree_experience.enable=True \
- env.tree_experience.experience_warmup_steps=2 \
- env.tree_experience.continue_experience_after_warmup=False \
  env.tree_experience.utility_update_interval=1 \
  env.tree_experience.min_delete_questions=2 \
  env.tree_experience.protect_recent_steps=0 \

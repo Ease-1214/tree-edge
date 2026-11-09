@@ -64,6 +64,8 @@ class ExperienceUpdater:
                 old_description = "Each example below is a contrast on the SAME question and the SAME turn: the rollout that received the listed experiences failed, while the rollout without any experience succeeded. So the injected experience either misled the agent or failed to prevent a mistake."
                 new_description = "Each example is a fork at one identical search state. LEFT omits only this turn's new experiences; RIGHT adds them. Both sides may retain earlier task experience. The actions shown are this turn's real actions; scores are terminal subtree success fractions. Delta=RIGHT-LEFT can show helped, harmed, or neutral evidence. Distill a reusable strategy from either sign without treating a noisy fork as certain causality."
                 prompt = prompt.replace(old_description, new_description)
+                prompt = prompt.replace("Generate 1-", "Generate 0-")
+                prompt += "\nFor each object include experience_type: task or step. task is a reusable multi-turn solving strategy, usually from a root fork. step is an action or warning for a concrete state, usually from an internal fork. You may return an empty array and need not produce both types.\n"
                 prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience.")
         else:
             prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
@@ -72,6 +74,7 @@ class ExperienceUpdater:
         started = time.perf_counter()
         request_count_before = self._audit_request_count
         parsed_count = 0
+        self.last_update_succeeded = False
         request_succeeded = False
         try:
             request_kwargs = {
@@ -83,6 +86,7 @@ class ExperienceUpdater:
             request_succeeded = True
             raw_experiences = self._parse_experiences_response(response.choices[0].message.content)
             parsed_count = len(raw_experiences)
+            self.last_update_succeeded = self.last_parse_succeeded
             if domain == "search":
                 raw_experiences = self._postprocess_search_experiences(raw_experiences, failed_trajectories)
             reassigned = self._reassign_exp_ids(raw_experiences, next_exp_idx)
@@ -275,12 +279,14 @@ Return ONLY a JSON array of experience objects.
             return "\n".join([
                 f"\nExample {idx}:", f"Question: {traj.get('task', '')}",
                 f"Fork ID: {traj['fork_id']}",
+                f"Fork depth: {traj.get('fork_depth')} (root=1, internal>1)",
+                "Common earlier task experience: " + json.dumps(traj.get("common_task_experience", {}), ensure_ascii=False),
                 "Search history before fork: " + json.dumps(traj.get("search_history", []), ensure_ascii=False),
                 "New experiences at this fork: " + json.dumps(traj.get("added_experiences", []), ensure_ascii=False),
                 f"LEFT action: {pair['without_experience'].get('action', '')}",
                 f"RIGHT action: {pair['with_experience'].get('action', '')}",
-                f"LEFT subtree success: {pair['without_experience'].get('score')}",
-                f"RIGHT subtree success: {pair['with_experience'].get('score')}",
+                f"LEFT subtree success: {pair['without_experience'].get('successes')}/{pair['without_experience'].get('total')} = {pair['without_experience'].get('score')}",
+                f"RIGHT subtree success: {pair['with_experience'].get('successes')}/{pair['with_experience'].get('total')} = {pair['with_experience'].get('score')}",
                 f"Delta: {traj['delta']}; experience {traj['effect']}",
             ]) + "\n"
         pair = traj.get("paired_rollout", {}) or {}
@@ -400,6 +406,15 @@ Return ONLY a JSON array of experience objects.
                 "source_traj_uids": sources,
                 "last_updated_step": None,  # set by the trainer to the real global step
             }
+            if any(x.get("fork_id") for x in failed_trajectories):
+                source_depths = []
+                for source in exp.get("source_examples", []) or []:
+                    try:
+                        source_depths.append(int(failed_trajectories[int(source)-1]["fork_depth"]))
+                    except (ValueError, TypeError, KeyError, IndexError):
+                        continue
+                if exp.get("experience_type") not in ("task", "step"):
+                    exp["experience_type"] = "task" if (source_depths[0] if source_depths else failed_trajectories[0].get("fork_depth", 2)) == 1 else "step"
             exp.pop("source_examples", None)
             kept.append(exp)
         if self.last_answer_leak_dropped:
@@ -455,6 +470,7 @@ Return ONLY a JSON array of experience objects.
     # ------------------------------------------------------------------ #
 
     def _parse_experiences_response(self, response: str) -> List[Dict]:
+        self.last_parse_succeeded = False
         try:
             json_start = response.find("[")
             json_end = response.rfind("]") + 1
@@ -477,6 +493,7 @@ Return ONLY a JSON array of experience objects.
                     ):
                         item.setdefault("evidence", {})
                         parsed.append(item)
+                self.last_parse_succeeded = len(items) == 0 or len(parsed) > 0
                 return parsed
         except json.JSONDecodeError as e:
             print(f"[ExperienceUpdater] JSON parse error: {e}")
