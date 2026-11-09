@@ -840,7 +840,13 @@ class ActorRolloutRefWorker(Worker):
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
-        self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep, track_for_retention=track_for_retention)
+        adapter_only = list(self.config.actor.checkpoint.contents) == ["lora_adapter"]
+        if adapter_only:
+            if not self._is_lora or not isinstance(self.actor_module, PeftModel):
+                raise ValueError("Adapter-only checkpoints require an active PEFT LoRA actor")
+            os.makedirs(local_path, exist_ok=True)
+        else:
+            self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep, track_for_retention=track_for_retention)
         dist.barrier()
 
         if self._is_lora and isinstance(self.actor_module, PeftModel):

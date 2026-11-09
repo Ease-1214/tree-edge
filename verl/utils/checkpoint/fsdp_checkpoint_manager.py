@@ -63,7 +63,10 @@ class FSDPCheckpointManager(BaseCheckpointManager):
             assert "tokenizer" in kwargs, "tokenizer or processor must be provided"
             warnings.warn("`tokenizer` is deprecated. use `processing_class` instead.", DeprecationWarning, stacklevel=2)
             processing_class = kwargs.pop("tokenizer")
-        assert "model" in checkpoint_contents and "optimizer" in checkpoint_contents and "extra" in checkpoint_contents, f"FSDPCheckpointManager must include ['model', 'optimizer', 'extra'], got {checkpoint_contents}"
+        adapter_only = list(checkpoint_contents) == ["lora_adapter"]
+        assert adapter_only or (
+            "model" in checkpoint_contents and "optimizer" in checkpoint_contents and "extra" in checkpoint_contents
+        ), f"FSDPCheckpointManager requires model/optimizer/extra or lora_adapter, got {checkpoint_contents}"
 
         super().__init__(
             model,

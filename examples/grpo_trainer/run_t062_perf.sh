@@ -44,7 +44,7 @@ export CC=/home/zehao/.conda/envs/tree-edge/bin/x86_64-conda-linux-gnu-cc
 export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/r
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
-export ENABLE_EXPERIENCE_EVOLUTION=false ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
+export ENABLE_EXPERIENCE_EVOLUTION=${ENABLE_EXPERIENCE_EVOLUTION:-false} ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
 export MODEL_PATH=/home/zehao/Tree-GRPO/model/Qwen2.5-3B-Instruct
 export TRAIN_DATA=$T061/data/train.parquet VAL_DATA=$T061/data/validation-smoke280.parquet
 export EMBEDDING_MODEL=$T061/assets/Qwen3-Embedding-0.6B

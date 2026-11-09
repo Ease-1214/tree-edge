@@ -8,6 +8,7 @@ state-aware experiences instead of generic experiences.
 import json
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -35,11 +36,17 @@ class ExperienceUpdater:
             )
 
         self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self._audit_request_count = 0
+        if os.environ.get("T063_REFLECTOR_AUDIT") == "1":
+            self.client._client.event_hooks.setdefault("request", []).append(self._audit_request)
         self.model = model
         self.max_completion_tokens = max_completion_tokens
         self.max_new_experiences_per_update = max_new_experiences_per_update
         self.token_limit_param = token_limit_param
         self.update_history = []
+
+    def _audit_request(self, request):
+        self._audit_request_count += 1
 
     def analyze_failures(
         self,
@@ -52,6 +59,10 @@ class ExperienceUpdater:
         next_exp_idx = self._next_exp_index(current_experiences)
         prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
 
+        started = time.perf_counter()
+        request_count_before = self._audit_request_count
+        parsed_count = 0
+        request_succeeded = False
         try:
             request_kwargs = {
                 "model": self.model,
@@ -59,7 +70,9 @@ class ExperienceUpdater:
                 self.token_limit_param: self.max_completion_tokens,
             }
             response = self.client.chat.completions.create(**request_kwargs)
+            request_succeeded = True
             raw_experiences = self._parse_experiences_response(response.choices[0].message.content)
+            parsed_count = len(raw_experiences)
             reassigned = self._reassign_exp_ids(raw_experiences, next_exp_idx)
             self.update_history.append(
                 {
@@ -72,6 +85,17 @@ class ExperienceUpdater:
         except Exception as e:
             print(f"[ExperienceUpdater] Error calling {self.model}: {e}")
             return []
+        finally:
+            if os.environ.get("T063_REFLECTOR_AUDIT") == "1":
+                attempts = self._audit_request_count - request_count_before
+                print("T063_REFLECTOR_RESULT " + json.dumps({
+                    "model": self.model,
+                    "request_succeeded": request_succeeded,
+                    "parsed_experiences": parsed_count,
+                    "http_attempts": attempts,
+                    "retry_count": max(0, attempts - 1),
+                    "seconds": time.perf_counter() - started,
+                }), flush=True)
 
     # ------------------------------------------------------------------ #
     # Prompt construction                                                 #
