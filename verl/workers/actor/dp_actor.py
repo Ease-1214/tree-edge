@@ -93,6 +93,9 @@ class DataParallelPPOActor(BasePPOActor):
         print(f"Actor use_remove_padding={self.use_remove_padding}")
         self.use_fused_kernels = self.config.get("use_fused_kernels", False)
         print(f"Actor use_fused_kernels={self.use_fused_kernels}")
+        # T062: project hidden states to vocabulary only at positions that predict response tokens.
+        self.response_only_logits = bool(self.config.get("response_only_logits", False))
+        print(f"Actor response_only_logits={self.response_only_logits}")
 
         self.ulysses_sequence_parallel_size = self.config.ulysses_sequence_parallel_size
         self.use_ulysses_sp = self.ulysses_sequence_parallel_size > 1
@@ -103,6 +106,83 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
         self.device_name = get_device_name()
+
+    def _forward_response_only_rmpad(
+        self,
+        input_ids,
+        attention_mask,
+        position_ids,
+        response_length,
+        temperature,
+        calculate_entropy,
+        calculate_log_probs,
+        token_selection_top_k,
+        token_selection_ids,
+    ):
+        """Remove-padding forward that applies lm_head only where logits are consumed.
+
+        The default path materialises (total_nnz, vocab) logits for every prompt and
+        response token and then keeps only the response slice [-R-1:-1]. In EDGE search
+        rows the prompt (question + retrieved history) dominates total_nnz, so this
+        computes exactly the same response-position values with far less memory and
+        compute. Returned tensors have the same (bsz, R[, k]) shapes and zero padding
+        at invalid positions as the default path.
+        """
+        batch_size, seqlen = input_ids.shape
+        device = input_ids.device
+        input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)
+        input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
+        position_ids_rmpad = index_first_axis(rearrange(position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), indices).transpose(0, 1)
+        labels_rolled = torch.roll(input_ids_rmpad, shifts=-1, dims=1).squeeze(0)  # (total_nnz,)
+
+        # Map the response predictor positions [-R-1:-1] of every row to rmpad indices.
+        total_nnz = input_ids_rmpad.size(1)
+        inverse = torch.full((batch_size * seqlen,), -1, dtype=torch.long, device=device)
+        inverse[indices] = torch.arange(total_nnz, device=device)
+        seq_pos = torch.arange(seqlen - response_length - 1, seqlen - 1, device=device)
+        flat = torch.arange(batch_size, device=device).unsqueeze(1) * seqlen + seq_pos.unsqueeze(0)  # (bsz, R)
+        rm_idx = inverse[flat]
+        valid = rm_idx >= 0
+        row_idx, resp_idx = valid.nonzero(as_tuple=True)
+        keep_idx = rm_idx[row_idx, resp_idx]  # ascending
+
+        output = self.actor_module(
+            input_ids=input_ids_rmpad,
+            attention_mask=None,
+            position_ids=position_ids_rmpad,
+            use_cache=False,
+            logits_to_keep=keep_idx,
+        )
+        logits = output.logits.squeeze(0)  # (n_keep, vocab)
+        logits.div_(temperature)
+        labels = labels_rolled[keep_idx]
+
+        entropy = log_probs = selected_logits = selected_token_ids = None
+        sel_logits_kept = sel_ids_kept = None
+        if token_selection_top_k is not None:
+            if token_selection_ids is None:
+                sel_logits_kept, sel_ids_kept = torch.topk(logits, k=min(token_selection_top_k, logits.size(-1)), dim=-1)
+            else:
+                if token_selection_ids.dim() != 3 or token_selection_ids.shape[:2] != (batch_size, response_length):
+                    raise ValueError(
+                        "token_selection_ids must have shape [batch, response_length, top_k], "
+                        f"got {tuple(token_selection_ids.shape)}"
+                    )
+                sel_ids_kept = token_selection_ids[row_idx, resp_idx]
+                sel_logits_kept = logits.gather(dim=-1, index=sel_ids_kept)
+
+        if calculate_log_probs:
+            inplace_backward = not (calculate_entropy or token_selection_top_k is not None)
+            lp_kept = logprobs_from_logits(logits=logits, labels=labels, inplace_backward=inplace_backward)
+            log_probs = torch.zeros((batch_size, response_length), dtype=lp_kept.dtype, device=device).index_put((row_idx, resp_idx), lp_kept)
+        if calculate_entropy:
+            ent_kept = self.compute_entropy_from_logits(logits)
+            entropy = torch.zeros((batch_size, response_length), dtype=ent_kept.dtype, device=device).index_put((row_idx, resp_idx), ent_kept)
+        if sel_logits_kept is not None:
+            k = sel_logits_kept.size(-1)
+            selected_logits = torch.zeros((batch_size, response_length, k), dtype=sel_logits_kept.dtype, device=device).index_put((row_idx, resp_idx), sel_logits_kept)
+            selected_token_ids = torch.zeros((batch_size, response_length, k), dtype=sel_ids_kept.dtype, device=device).index_put((row_idx, resp_idx), sel_ids_kept)
+        return entropy, log_probs, selected_logits, selected_token_ids
 
     def _forward_micro_batch(
         self,
@@ -148,7 +228,26 @@ class DataParallelPPOActor(BasePPOActor):
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
 
-            if self.use_remove_padding:
+            if (
+                self.use_remove_padding
+                and self.response_only_logits
+                and not self.use_ulysses_sp
+                and not self.use_fused_kernels
+                and not multi_modal_inputs
+                and position_ids.dim() == 2
+            ):
+                entropy, log_probs, selected_logits, selected_token_ids = self._forward_response_only_rmpad(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    response_length=response_length,
+                    temperature=temperature,
+                    calculate_entropy=calculate_entropy,
+                    calculate_log_probs=calculate_log_probs,
+                    token_selection_top_k=token_selection_top_k,
+                    token_selection_ids=token_selection_ids,
+                )
+            elif self.use_remove_padding:
                 input_ids_rmpad, indices, *_ = unpad_input(input_ids.unsqueeze(-1), attention_mask)  # input_ids_rmpad (total_nnz, ...)
                 input_ids_rmpad = input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 

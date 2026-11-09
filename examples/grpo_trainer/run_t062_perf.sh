@@ -22,6 +22,7 @@ PERF_VLLM_UTIL=${PERF_VLLM_UTIL:-0.5}
 PERF_QUESTIONS=${PERF_QUESTIONS:-32}
 PERF_STEPS=${PERF_STEPS:-2}
 PERF_GPUS=${PERF_GPUS:-4}
+# PERF_RESPONSE_ONLY_LOGITS (default True): lm_head only at response predictor positions
 
 if [[ "$PERF_MODEL_DTYPE" == "fp32" ]]; then MODEL_DTYPE_ARG=null; else MODEL_DTYPE_ARG=$PERF_MODEL_DTYPE; fi
 if [[ "$PERF_DYNAMIC_BSZ" == "1" ]]; then DYN=True; else DYN=False; fi
@@ -62,6 +63,7 @@ bash examples/grpo_trainer/run_search_edge.sh vllm \
  actor_rollout_ref.model.use_fused_kernels=False \
  actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
  actor_rollout_ref.actor.use_dynamic_bsz=$DYN \
+ actor_rollout_ref.actor.response_only_logits=${PERF_RESPONSE_ONLY_LOGITS:-True} \
  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$PERF_PPO_TOKENS \
  actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$PERF_LOGPROB_TOKENS \
  actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$PERF_LOGPROB_TOKENS \
