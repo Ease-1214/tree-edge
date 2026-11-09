@@ -47,7 +47,7 @@ def run_ppo(config) -> None:
         print(f"ray init kwargs: {ray_init_kwargs}")
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
-    runner = TaskRunner.remote()
+    runner = TaskRunner.options(num_gpus=float(os.environ.get("EDGE_CONTROLLER_GPUS", "0"))).remote()
     ray.get(runner.run.remote(config))
 
 
