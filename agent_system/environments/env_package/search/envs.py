@@ -14,6 +14,10 @@
 # limitations under the License.
 
 import asyncio
+import json
+import os
+import time
+from collections import defaultdict
 import concurrent.futures
 from typing import Any, Dict, List, Tuple
 
@@ -53,6 +57,11 @@ class SearchMultiProcessEnv(gym.Env):
         # ---------- Key changes start ----------
         # 1) Normalize search_url into a list
         search_cfg  = env_config.search
+        self.retrieval_batch_size = int(search_cfg.get("request_batch_size", 0))
+        if not 0 <= self.retrieval_batch_size <= 128:
+            raise ValueError("search.request_batch_size must be between0 and128")
+        if self.retrieval_batch_size and search_cfg.get("api_format", "edge_single") != "search_r1_batch":
+            raise ValueError("Batched search requires search_r1_batch API")
         search_urls = search_cfg.search_url
         if not isinstance(search_urls, ListConfig):
             search_urls = [search_urls]
@@ -123,6 +132,53 @@ class SearchMultiProcessEnv(gym.Env):
 
         return obs_list, info_list
 
+    def _prefetch_searches(self, actions):
+        from agent_system.environments.env_package.search.third_party.skyrl_gym.tools.search import call_search_api
+
+        started = time.perf_counter()
+        groups = defaultdict(list)
+        for env, action in zip(self.envs, actions):
+            if env.done or env.turns + 1 >= env.max_turns or env._is_done(action):
+                continue
+            query = env._parse_action(action)[0]
+            if query is None:
+                continue
+            tool = env.tool_group
+            key = (tool.search_url, tool.topk, tool.timeout, tool.log_requests)
+            groups[key].append((tool, query.strip()))
+
+        query_count = 0
+        request_count = 0
+        error_count = 0
+        for (url, topk, timeout, log_requests), pending in groups.items():
+            for start in range(0, len(pending), self.retrieval_batch_size):
+                chunk = pending[start:start + self.retrieval_batch_size]
+                queries = [query for _, query in chunk]
+                response, error = call_search_api(
+                    retrieval_service_url=url, query="", queries=queries, topk=topk,
+                    timeout=timeout, log_requests=log_requests, api_format="search_r1_batch",
+                    session=chunk[0][0].session,
+                )
+                query_count += len(chunk)
+                request_count += 1
+                if error is not None:
+                    error_count += len(chunk)
+                for index, (tool, query) in enumerate(chunk):
+                    single_response = None if response is None else dict(response, result=[response["result"][index]])
+                    tool._prefetched_search = (query, single_response, error)
+        self.last_search_metrics = {
+            "is_train": self.is_train,
+            "queries": query_count,
+            "requests": request_count,
+            "errors": error_count,
+            "seconds": time.perf_counter() - started,
+        }
+        print("EDGE_SEARCH_BATCH " + json.dumps(self.last_search_metrics), flush=True)
+        metrics_path = os.environ.get("EDGE_SEARCH_METRICS_PATH")
+        if metrics_path:
+            with open(metrics_path, "a") as stream:
+                stream.write(json.dumps(self.last_search_metrics) + "\n")
+
     def step(self, actions: List[str]):
         if len(actions) > self.batch_size:
             raise ValueError(f"Got {len(actions)} actions, but the env was initialized with total_envs={self.batch_size}")
@@ -131,11 +187,20 @@ class SearchMultiProcessEnv(gym.Env):
         padded_actions = list(actions) + [""] * pad_n
         valid_mask = [True] * len(actions) + [False] * pad_n
 
-        tasks = [
-            self._loop.run_in_executor(self._executor, self._sync_step, env, act)
-            for env, act in zip(self.envs, padded_actions)
-        ]
-        results = self._loop.run_until_complete(asyncio.gather(*tasks))
+        try:
+            if self.retrieval_batch_size:
+                self._prefetch_searches(actions)
+            tasks = [
+                self._loop.run_in_executor(self._executor, self._sync_step, env, act)
+                for env, act in zip(self.envs, padded_actions)
+            ]
+            results = self._loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+        finally:
+            for env in self.envs:
+                env.tool_group._prefetched_search = None
 
         obs_list, reward_list, done_list, info_list = map(list, zip(*results))
 

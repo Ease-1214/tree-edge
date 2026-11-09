@@ -374,6 +374,7 @@ env:
   search:
     log_requests: false
     api_format: edge_single
+    request_batch_size: 0 # Set128 for round-batched Search-R1 retrieval.
     search_url: "http://127.0.0.1:8000/retrieve" # also support multiple urls: ["http://127.0.0.1:8000/retrieve", "http://127.0.0.1:8001/retrieve"]
     topk: 3
     timeout: 60
