@@ -504,6 +504,20 @@ class ExperienceMemory(BaseMemory):
         return self._embedding_model
 
     def _encode_texts(self, texts: List[str], normalize_embeddings: bool = True):
+        import faulthandler
+        import time
+        import torch
+
+        started = time.monotonic()
+        print(f"T061_EMBED_START rows={len(texts)} chars={sum(len(t) for t in texts)} threads={torch.get_num_threads()}", flush=True)
+        faulthandler.dump_traceback_later(120, repeat=True)
+        try:
+            return self._encode_texts_impl(texts, normalize_embeddings)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+            print(f"T061_EMBED_END seconds={time.monotonic() - started:.3f}", flush=True)
+
+    def _encode_texts_impl(self, texts: List[str], normalize_embeddings: bool = True):
         import numpy as np
 
         if not texts:
