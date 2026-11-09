@@ -565,8 +565,10 @@ class ExperienceMemory(BaseMemory):
                 merged = np.expand_dims(merged, axis=0)
             return merged
 
+        import os
         embeddings = model.encode(
             texts,
+            batch_size=int(os.environ.get("EDGE_EMBED_BATCH_SIZE", "32")),
             normalize_embeddings=normalize_embeddings,
             show_progress_bar=False,
             convert_to_numpy=True,
