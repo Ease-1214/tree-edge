@@ -50,6 +50,7 @@ actor_rollout_ref:
     use_dynamic_bsz: False
     ppo_max_token_len_per_gpu: 16384 # n * ${data.max_prompt_length} + ${data.max_response_length}
     response_only_logits: False # T062: apply lm_head only at response predictor positions (same values, less memory)
+    edge_teacher_active_only: True # T062: EDGE teacher forward only on gate-active rows (others are masked out of the loss)
     grad_clip: 1.0
     # pg_losses2 = -advantages * torch.clamp(ratio, 1 - cliprange_low, 1 + cliprange_high)
     clip_ratio: 0.2 # default value if clip_ratio_low and clip_ratio_high are not specified

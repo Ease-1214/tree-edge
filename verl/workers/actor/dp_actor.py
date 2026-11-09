@@ -460,6 +460,60 @@ class DataParallelPPOActor(BasePPOActor):
         return grad_norm
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
+    @torch.no_grad()
+    def _edge_teacher_forward_active(self, data, responses, temperature, top_k=None):
+        """Teacher (experience-conditioned) forward restricted to gate-active rows.
+
+        Both EDGE distillation losses multiply by active_mask = response_mask * (weight > 0),
+        so inactive rows never reach the loss.  Their teacher outputs are filled with zeros
+        (finite, masked away); the loss is that of the full-batch teacher pass up to
+        kernel-level float noise from packing fewer rows.  Set actor.edge_teacher_active_only=False to restore it.
+        Returns (teacher_log_prob | None, teacher_topk_logits | None, teacher_topk_ids | None).
+        """
+        bsz, resp_len = responses.shape
+        device = responses.device
+        if self.config.get("edge_teacher_active_only", True):
+            active = torch.gt(data["edge_distill_weight"].to(device), 0).nonzero(as_tuple=True)[0]
+        else:
+            active = torch.arange(bsz, device=device)
+        n_active = int(active.numel())
+        self._edge_teacher_rows = getattr(self, "_edge_teacher_rows", 0) + n_active
+        self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + bsz
+
+        k = top_k
+        log_prob_full = None if top_k is not None else torch.zeros((bsz, resp_len), dtype=torch.float32, device=device)
+        logits_full = ids_full = None
+        if top_k is not None:
+            ids_full = torch.zeros((bsz, resp_len, k), dtype=torch.long, device=device)
+        if n_active == 0:
+            if top_k is not None:
+                logits_full = torch.zeros((bsz, resp_len, k), dtype=torch.float32, device=device)
+            return log_prob_full, logits_full, ids_full
+
+        teacher_batch = {
+            "responses": responses.index_select(0, active),
+            "input_ids": data["edge_teacher_input_ids"].index_select(0, active),
+            "attention_mask": data["edge_teacher_attention_mask"].index_select(0, active),
+            "position_ids": data["edge_teacher_position_ids"].index_select(0, active),
+        }
+        if top_k is not None:
+            _, _, sel_logits, sel_ids = self._forward_micro_batch(
+                micro_batch=teacher_batch, temperature=temperature, calculate_entropy=False,
+                calculate_log_probs=False, token_selection_top_k=top_k,
+            )
+            k = sel_logits.size(-1)
+            logits_full = torch.zeros((bsz, resp_len, k), dtype=sel_logits.dtype, device=device)
+            logits_full.index_copy_(0, active, sel_logits)
+            ids_full = torch.zeros((bsz, resp_len, k), dtype=sel_ids.dtype, device=device)
+            ids_full.index_copy_(0, active, sel_ids)
+        else:
+            _, lp, _, _ = self._forward_micro_batch(
+                micro_batch=teacher_batch, temperature=temperature, calculate_entropy=False,
+            )
+            log_prob_full = torch.zeros((bsz, resp_len), dtype=lp.dtype, device=device)
+            log_prob_full.index_copy_(0, active, lp)
+        return log_prob_full, logits_full, ids_full
+
     def compute_log_prob(self, data: DataProto, calculate_entropy=False) -> torch.Tensor:
         """Compute the log probability of the responses given input_ids, attention_mask and position_ids
 
@@ -618,22 +672,12 @@ class DataParallelPPOActor(BasePPOActor):
                     teacher_topk_logits = None
                     teacher_topk_ids = None
                     if edge_distillation_enabled and edge_token_selection == "teacher_topk":
-                        teacher_batch = {
-                            "responses": responses,
-                            "input_ids": data["edge_teacher_input_ids"],
-                            "attention_mask": data["edge_teacher_attention_mask"],
-                            "position_ids": data["edge_teacher_position_ids"],
-                        }
-                        # Keep the existing train/eval semantics: this is the same
-                        # actor module under no_grad, only evaluated before student.
-                        with torch.no_grad():
-                            _, _, teacher_topk_logits, teacher_topk_ids = self._forward_micro_batch(
-                                micro_batch=teacher_batch,
-                                temperature=temperature,
-                                calculate_entropy=False,
-                                calculate_log_probs=False,
-                                token_selection_top_k=edge_top_k,
-                            )
+                        # Same actor module under no_grad, evaluated before the student,
+                        # but only on rows the gate activated (weight > 0): every other row
+                        # is masked out of the distillation loss, so its teacher pass is waste.
+                        _, teacher_topk_logits, teacher_topk_ids = self._edge_teacher_forward_active(
+                            data, responses, temperature, top_k=edge_top_k
+                        )
 
                     # all return: (bsz, response_length)
                     calculate_entropy = False
@@ -695,18 +739,9 @@ class DataParallelPPOActor(BasePPOActor):
                                 loss_agg_mode=loss_agg_mode,
                             )
                         else:
-                            teacher_batch = {
-                                "responses": responses,
-                                "input_ids": data["edge_teacher_input_ids"],
-                                "attention_mask": data["edge_teacher_attention_mask"],
-                                "position_ids": data["edge_teacher_position_ids"],
-                            }
-                            with torch.no_grad():
-                                _, teacher_log_prob, _, _ = self._forward_micro_batch(
-                                    micro_batch=teacher_batch,
-                                    temperature=temperature,
-                                    calculate_entropy=False,
-                                )
+                            teacher_log_prob, _, _ = self._edge_teacher_forward_active(
+                                data, responses, temperature, top_k=None
+                            )
                             edge_loss, edge_metrics = compute_edge_distillation_loss(
                                 student_log_prob=log_prob,
                                 teacher_log_prob=teacher_log_prob,
@@ -737,5 +772,8 @@ class DataParallelPPOActor(BasePPOActor):
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
+        if getattr(self, "_edge_teacher_rows_total", 0):
+            metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
+            self._edge_teacher_rows = self._edge_teacher_rows_total = 0
         metrics["actor/optimizer_steps_per_train_step"] = [self._optimizer_steps_this_update]
         return metrics

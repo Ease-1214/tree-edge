@@ -493,6 +493,8 @@ class ExperienceMemory(BaseMemory):
                 self._embedding_models = [
                     SentenceTransformer(self.embedding_model_path, device=f"cuda:{i}") for i in range(n)
                 ]
+                for m in self._embedding_models:
+                    self._maybe_cast_embedding_model(m)
                 self._embedding_model = self._embedding_models[0]
                 print(f"[ExperienceMemory] {n} embedding models ready.")
             return self._embedding_models[0]
@@ -500,8 +502,151 @@ class ExperienceMemory(BaseMemory):
         if self._embedding_model is None:
             print(f"[ExperienceMemory] Loading embedding model: {self.embedding_model_path} on {target_device}")
             self._embedding_model = SentenceTransformer(self.embedding_model_path, device=target_device)
+            self._maybe_cast_embedding_model(self._embedding_model)
             print(f"[ExperienceMemory] Embedding model ready on {target_device}.")
         return self._embedding_model
+
+    def _maybe_cast_embedding_model(self, model) -> None:
+        """Run the frozen embedding encoder in bf16 by default (EDGE_EMBED_DTYPE=fp32 to disable).
+
+        Halves activation memory and roughly doubles throughput; cosine scores move at the
+        ~1e-3 level, which only reorders near-ties.  Applied identically to every method.
+        """
+        dtype_name = os.environ.get("EDGE_EMBED_DTYPE", "bf16").lower()
+        if dtype_name in ("fp32", "float32", "none", ""):
+            return
+        try:
+            import torch
+            dtype = {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
+                     "fp16": torch.float16, "float16": torch.float16}[dtype_name]
+            if str(getattr(model, "device", "cpu")).startswith("cuda"):
+                model.to(dtype)
+                print(f"T062_EMBED_DTYPE {dtype_name}", flush=True)
+        except Exception as exc:  # keep fp32 rather than failing the run
+            print(f"T062_EMBED_DTYPE_FALLBACK fp32 reason={exc!r}", flush=True)
+
+    def _embed_mem_cap(self, model) -> None:
+        """Optional hard memory cap for the embedding process (EDGE_EMBED_MEM_GB).
+
+        With a cap, an oversized batch raises OOM early and is split, instead of growing
+        into memory that another process on the same GPU (e.g. a shared retriever) needs.
+        """
+        if getattr(self, "_embed_mem_cap_done", False):
+            return
+        self._embed_mem_cap_done = True
+        cap_gb = float(os.environ.get("EDGE_EMBED_MEM_GB", "0") or 0)
+        if cap_gb <= 0:
+            return
+        try:
+            import torch
+            dev = torch.device(str(model.device))
+            if dev.type != "cuda":
+                return
+            total = torch.cuda.get_device_properties(dev).total_memory
+            frac = min(1.0, cap_gb * (1 << 30) / total)
+            torch.cuda.set_per_process_memory_fraction(frac, dev)
+            print(f"T062_EMBED_MEM_CAP gb={cap_gb} frac={frac:.3f}", flush=True)
+        except Exception as exc:
+            print(f"T062_EMBED_MEM_CAP_SKIPPED reason={exc!r}", flush=True)
+
+    def _encode_dynamic(self, model, texts: List[str], normalize_embeddings: bool = True):
+        """Token-budget dynamic batching with exact-duplicate dedupe and OOM split-retry.
+
+        * duplicates in one call are encoded once (many forks share the same query text);
+        * texts are sorted by token length and packed so that batch_rows * longest_row stays
+          under a padded-token budget (EDGE_EMBED_TOKEN_BUDGET, default 32768) and at most
+          EDGE_EMBED_MAX_ROWS rows (default 256): short queries go in big batches, long
+          observations in small ones;
+        * on CUDA OOM the offending batch is halved and retried (down to one row) and the
+          budget is lowered for later calls; it creeps back up after clean batches, so a
+          single spike does not slow the rest of the run.
+        Output rows are identical in content and order to model.encode(texts).
+        """
+        import numpy as np
+
+        n = len(texts)
+        if n == 0:
+            return np.array([]).reshape(0, 0)
+        self._embed_mem_cap(model)
+
+        uniq_index: Dict[str, int] = {}
+        uniq_texts: List[str] = []
+        inverse = np.empty(n, dtype=np.int64)
+        for i, t in enumerate(texts):
+            j = uniq_index.get(t)
+            if j is None:
+                j = len(uniq_texts)
+                uniq_index[t] = j
+                uniq_texts.append(t)
+            inverse[i] = j
+
+        max_len = int(getattr(model, "max_seq_length", 0) or 0) or 8192
+        try:
+            tok = model.tokenizer(uniq_texts, add_special_tokens=True, truncation=True,
+                                  max_length=max_len, return_attention_mask=False,
+                                  return_token_type_ids=False)["input_ids"]
+            lengths = [len(x) for x in tok]
+        except Exception:
+            lengths = [min(max_len, len(t) // 3 + 8) for t in uniq_texts]  # rough fallback
+        order = sorted(range(len(uniq_texts)), key=lambda k: -lengths[k])
+
+        base_budget = int(os.environ.get("EDGE_EMBED_TOKEN_BUDGET", "32768"))
+        max_rows = int(os.environ.get("EDGE_EMBED_MAX_ROWS", "256"))
+        if not hasattr(self, "_embed_budget"):
+            self._embed_budget = base_budget
+            self._embed_clean = 0
+
+        batches: List[List[int]] = []
+        cur: List[int] = []
+        cur_max = 0
+        for k in order:
+            L = max(1, lengths[k])
+            new_max = max(cur_max, L)
+            if cur and (len(cur) + 1 > max_rows or (len(cur) + 1) * new_max > self._embed_budget):
+                batches.append(cur)
+                cur, new_max = [], L
+            cur.append(k)
+            cur_max = new_max
+        if cur:
+            batches.append(cur)
+
+        out: List[Optional[Any]] = [None] * len(uniq_texts)
+        stack = list(reversed(batches))
+        splits = 0
+        while stack:
+            idx = stack.pop()
+            try:
+                embs = model.encode(
+                    [uniq_texts[k] for k in idx],
+                    batch_size=len(idx),
+                    normalize_embeddings=normalize_embeddings,
+                    show_progress_bar=False,
+                    convert_to_numpy=True,
+                )
+            except Exception as exc:
+                if "out of memory" not in str(exc).lower() or len(idx) == 1:
+                    raise
+                import torch
+                torch.cuda.empty_cache()
+                splits += 1
+                padded = len(idx) * max(lengths[k] for k in idx)
+                self._embed_budget = max(512, min(self._embed_budget, padded // 2))
+                self._embed_clean = 0
+                half = len(idx) // 2
+                stack.append(idx[half:])
+                stack.append(idx[:half])
+                continue
+            for row, k in enumerate(idx):
+                out[k] = embs[row]
+            self._embed_clean += 1
+            if self._embed_budget < base_budget and self._embed_clean >= 32:
+                self._embed_budget = min(base_budget, int(self._embed_budget * 1.25))
+                self._embed_clean = 0
+
+        if splits:
+            print(f"T062_EMBED_OOM_SPLIT splits={splits} budget_now={self._embed_budget}", flush=True)
+        uniq = np.stack([np.asarray(e, dtype=np.float32) for e in out], axis=0)
+        return uniq[inverse]
 
     def _encode_texts(self, texts: List[str], normalize_embeddings: bool = True):
         import faulthandler
@@ -539,12 +684,7 @@ class ExperienceMemory(BaseMemory):
             def _encode_one(model, batch_texts):
                 if not batch_texts:
                     return None
-                return model.encode(
-                    batch_texts,
-                    normalize_embeddings=normalize_embeddings,
-                    show_progress_bar=False,
-                    convert_to_numpy=True,
-                )
+                return self._encode_dynamic(model, batch_texts, normalize_embeddings)
 
             outputs: List[Optional[Any]] = [None] * n_models
             with ThreadPoolExecutor(max_workers=n_models) as executor:
@@ -565,14 +705,7 @@ class ExperienceMemory(BaseMemory):
                 merged = np.expand_dims(merged, axis=0)
             return merged
 
-        import os
-        embeddings = model.encode(
-            texts,
-            batch_size=int(os.environ.get("EDGE_EMBED_BATCH_SIZE", "32")),
-            normalize_embeddings=normalize_embeddings,
-            show_progress_bar=False,
-            convert_to_numpy=True,
-        )
+        embeddings = self._encode_dynamic(model, texts, normalize_embeddings)
         if hasattr(embeddings, "shape") and len(embeddings.shape) == 1:
             embeddings = np.expand_dims(embeddings, axis=0)
         return embeddings

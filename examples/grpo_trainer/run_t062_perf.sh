@@ -4,25 +4,28 @@
 # distillation, experience management, prompts, rewards). Validation and checkpoints are off.
 #
 # Usage (example):
-#   PERF_TAG=b1 PERF_MODEL_DTYPE=bf16 PERF_FSDP_SIZE=1 PERF_DYNAMIC_BSZ=1 PERF_EAGER=0 \
-#   PERF_VLLM_UTIL=0.6 PERF_QUESTIONS=128 PERF_STEPS=2 bash examples/grpo_trainer/run_t062_perf.sh
+#   PERF_TAG=f1 PERF_QUESTIONS=128 PERF_STEPS=2 bash examples/grpo_trainer/run_t062_perf.sh   # defaults = final config
 set -euo pipefail
 
 ROOT=${T062_ROOT:-/home/zehao/echo-collab/T062}
 T061=${T061_ROOT:-/home/zehao/echo-collab/T061}
 
 PERF_TAG=${PERF_TAG:?Set PERF_TAG to a short run label}
-PERF_MODEL_DTYPE=${PERF_MODEL_DTYPE:-fp32}     # fp32 = T061 behaviour, bf16 = frozen base stored in bf16
-PERF_FSDP_SIZE=${PERF_FSDP_SIZE:--1}           # -1 = FULL_SHARD (T061), 1 = every GPU keeps a full replica
-PERF_DYNAMIC_BSZ=${PERF_DYNAMIC_BSZ:-0}         # 1 = token-budget micro-batches instead of fixed 2/4 rows
+PERF_MODEL_DTYPE=${PERF_MODEL_DTYPE:-bf16}     # bf16 = frozen base stored in bf16 (final), fp32 = T061 behaviour
+PERF_FSDP_SIZE=${PERF_FSDP_SIZE:-1}            # 1 = every GPU keeps a full replica (final), -1 = FULL_SHARD (T061)
+PERF_DYNAMIC_BSZ=${PERF_DYNAMIC_BSZ:-1}         # 1 = token-budget micro-batches (final), 0 = fixed 2/4 rows
 PERF_PPO_TOKENS=${PERF_PPO_TOKENS:-12288}       # per-GPU token budget for actor update (>= 5700 max row)
 PERF_LOGPROB_TOKENS=${PERF_LOGPROB_TOKENS:-24576}
-PERF_EAGER=${PERF_EAGER:-1}                     # 1 = eager (T061), 0 = CUDA graph
-PERF_VLLM_UTIL=${PERF_VLLM_UTIL:-0.5}
+PERF_EAGER=${PERF_EAGER:-0}                     # 0 = CUDA graph (final), 1 = eager (T061)
+PERF_VLLM_UTIL=${PERF_VLLM_UTIL:-0.55}
+PERF_VLLM_BATCHED_TOKENS=${PERF_VLLM_BATCHED_TOKENS:-16384}  # vLLM scheduler token budget per step (prefill of 5k-token prompts)
+PERF_CHUNKED_PREFILL=${PERF_CHUNKED_PREFILL:-True}
 PERF_QUESTIONS=${PERF_QUESTIONS:-32}
 PERF_STEPS=${PERF_STEPS:-2}
 PERF_GPUS=${PERF_GPUS:-4}
 # PERF_RESPONSE_ONLY_LOGITS (default True): lm_head only at response predictor positions
+# PERF_TEACHER_ACTIVE_ONLY (default True): EDGE teacher forward only on gate-active rows
+# Embedding (aux GPU): dynamic token-budget batches, see EDGE_EMBED_* below
 
 if [[ "$PERF_MODEL_DTYPE" == "fp32" ]]; then MODEL_DTYPE_ARG=null; else MODEL_DTYPE_ARG=$PERF_MODEL_DTYPE; fi
 if [[ "$PERF_DYNAMIC_BSZ" == "1" ]]; then DYN=True; else DYN=False; fi
@@ -33,7 +36,10 @@ mkdir -p "$RUN_DIR"
 
 export PATH=/home/zehao/.conda/envs/tree-edge/bin:/home/zehao/miniforge3/bin:$PATH
 export EDGE_CONTROLLER_GPUS=1
-export EDGE_EMBED_BATCH_SIZE=8
+export EDGE_EMBED_TOKEN_BUDGET=${EDGE_EMBED_TOKEN_BUDGET:-32768}  # padded tokens per embedding batch; halves itself on OOM
+export EDGE_EMBED_MAX_ROWS=${EDGE_EMBED_MAX_ROWS:-256}
+export EDGE_EMBED_DTYPE=${EDGE_EMBED_DTYPE:-bf16}
+export EDGE_EMBED_MEM_GB=${EDGE_EMBED_MEM_GB:-0}                 # >0 caps the embedding process (e.g. 4 when sharing a GPU)
 export CC=/home/zehao/.conda/envs/tree-edge/bin/x86_64-conda-linux-gnu-cc
 export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/r
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
@@ -64,6 +70,7 @@ bash examples/grpo_trainer/run_search_edge.sh vllm \
  actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
  actor_rollout_ref.actor.use_dynamic_bsz=$DYN \
  actor_rollout_ref.actor.response_only_logits=${PERF_RESPONSE_ONLY_LOGITS:-True} \
+ actor_rollout_ref.actor.edge_teacher_active_only=${PERF_TEACHER_ACTIVE_ONLY:-True} \
  actor_rollout_ref.actor.ppo_max_token_len_per_gpu=$PERF_PPO_TOKENS \
  actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=$PERF_LOGPROB_TOKENS \
  actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$PERF_LOGPROB_TOKENS \
@@ -71,6 +78,8 @@ bash examples/grpo_trainer/run_search_edge.sh vllm \
  actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
  actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
  actor_rollout_ref.rollout.gpu_memory_utilization=$PERF_VLLM_UTIL \
+ actor_rollout_ref.rollout.max_num_batched_tokens=$PERF_VLLM_BATCHED_TOKENS \
+ actor_rollout_ref.rollout.enable_chunked_prefill=$PERF_CHUNKED_PREFILL \
  actor_rollout_ref.rollout.free_cache_engine=$FREE_CACHE \
  actor_rollout_ref.rollout.enforce_eager=$EAGER \
  actor_rollout_ref.rollout.load_format=safetensors \
