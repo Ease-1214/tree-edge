@@ -52,8 +52,13 @@ export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SEARCH_URL=${SEARCH_URL:-http://127.0.0.1:29661/retrieve}
 export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
 export N_GPUS_PER_NODE=$PERF_GPUS TRAIN_DATA_SIZE=$PERF_QUESTIONS VAL_DATA_SIZE=128 GROUP_SIZE=8
+# Optional server-local network settings contain no credentials.
+if [[ -f "$ROOT/wandb-online.env" ]]; then
+  source "$ROOT/wandb-online.env"
+fi
 export WANDB_MODE=${WANDB_MODE:-online}
-export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890
+export HTTP_PROXY=${T062_HTTP_PROXY:-http://127.0.0.1:7890}
+export HTTPS_PROXY=$HTTP_PROXY
 export http_proxy=$HTTP_PROXY https_proxy=$HTTPS_PROXY
 export WANDB_BASE_URL=https://api.forge.coreweave.com WANDB_ENTITY=wuzehao1214-sun-yat-sen-university
 unset EDGE_SMOKE_AUDIT   # no per-step hashing / probes in throughput runs
