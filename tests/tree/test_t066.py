@@ -170,3 +170,13 @@ def test_full_tree_route_at_late_step(step, tmp_path, monkeypatch):
     assert collector.multi_turn_loop(batch, None, None, is_train=True) is sentinel
     source = Path(runner.__file__).parent.parent / "multi_turn_rollout/rollout_loop.py"
     assert "TREE_PHASE_SWITCH" not in source.read_text()
+
+
+def test_wandb_step_commits_immediately():
+    from verl.utils.tracking import Tracking
+    calls=[]
+    tracker=object.__new__(Tracking)
+    tracker._finished_del=True
+    tracker.logger={"wandb":SimpleNamespace(log=lambda **kwargs:calls.append(kwargs))}
+    tracker.log({"metric":1},step=1)
+    assert calls==[{"data":{"metric":1},"step":1,"commit":True}]
