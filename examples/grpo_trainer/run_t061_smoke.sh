@@ -31,7 +31,7 @@ bash examples/grpo_trainer/run_search_edge.sh vllm \
  actor_rollout_ref.rollout.free_cache_engine=True \
  actor_rollout_ref.rollout.enforce_eager=True \
  actor_rollout_ref.rollout.load_format=safetensors \
- actor_rollout_ref.rollout.layered_summon=True \
+ actor_rollout_ref.rollout.layered_summon=False \
  actor_rollout_ref.rollout.n=1 \
  env.search.api_format=search_r1_batch \
  env.experience_memory.device=cpu \

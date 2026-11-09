@@ -271,6 +271,8 @@ class FSDPVLLMShardingManager(BaseShardingManager):
                     peft_config=asdict(peft_config),
                     lora_tensors=updated_params,
                 )
+                if not updated_params:
+                    raise RuntimeError("LoRA parameter collection returned no tensors")
                 self.inference_engine.llm_engine.add_lora(lora_reqest)
                 loaded_ids = set(self.inference_engine.llm_engine.list_loras())
                 if loaded_ids != {lora_int_id}:
