@@ -32,7 +32,9 @@ def tree_kd_metrics(
     ).sum(-1)
     for label, group in [("no_T", ~path_has_T), ("with_T", path_has_T)]:
         mask = active * group.unsqueeze(-1)
-        count = mask.sum().clamp_min(1)
+        if not bool(mask.sum()):
+            continue
+        count = mask.sum()
         prefix = "kd/" + label + "/"
         metrics[prefix + "tokens"] = float(mask.sum())
         metrics[prefix + "rows"] = float(((weights > 0) & group).sum())

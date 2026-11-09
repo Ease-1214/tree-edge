@@ -266,3 +266,41 @@ def test_trace_student_teacher_and_shuffled_rows(tmp_path):
     b.batch["edge_teacher_input_ids"][selected, 0] += 1
     with pytest.raises(AssertionError):
         audit_training_tokens(b, t, 1, tmp_path / "bad.json")
+
+
+def test_tree_checkpoint_roundtrip_and_identity(tmp_path):
+    from agent_system.tree.training import save_tree_checkpoint, restore_tree_state
+
+    class Memory:
+        experiences = {
+            "task_experiences": [{"experience_id": "e", "utility": 0.2}],
+            "step_experiences": [],
+        }
+
+        def replace_experiences_keep_cache_incremental(self, bank):
+            self.experiences = bank
+
+    config = OmegaConf.create(
+        {
+            "env": {"tree_experience": {"enable": True}},
+            "trainer": {"default_local_dir": str(tmp_path)},
+        }
+    )
+    memory = Memory()
+    trainer = SimpleNamespace(
+        config=config,
+        global_steps=2,
+        envs=SimpleNamespace(retrieval_memory=memory),
+        tree_evidence=QuestionEvidence(),
+    )
+    trainer.tree_evidence.record({("e", "same-question"): -0.5})
+    save_tree_checkpoint(trainer, tmp_path / "global_step_2")
+    trainer.tree_evidence = QuestionEvidence()
+    restore_tree_state(trainer)
+    assert trainer.tree_evidence.statistics("e")["n"] == 1
+    path = tmp_path / "global_step_2/tree_state.json"
+    state = json.loads(path.read_text())
+    state["checkpoint_step"] = 1
+    path.write_text(json.dumps(state))
+    with pytest.raises(ValueError):
+        restore_tree_state(trainer)

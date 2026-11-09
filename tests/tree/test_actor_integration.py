@@ -120,6 +120,7 @@ def test_real_update_policy_joint_backward(
     assert len(calls) == expected_forwards
     assert len(steps) == 1 and len(backwards) == 2
     assert metrics["actor/optimizer_steps_per_train_step"] == [1]
+    assert metrics["perf/edge_teacher_row_fraction"] == (0.25 if active else 0.0)
     if active:
         teacher = [c for c in calls if not c["grad"]]
         assert len(teacher) == 1 and teacher[0]["rows"] == 1

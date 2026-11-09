@@ -689,6 +689,11 @@ class DataParallelPPOActor(BasePPOActor):
                     teacher_topk_logits = None
                     teacher_topk_ids = None
                     active_tree_kd = tree_batch and bool((data["edge_distill_weight"] > 0).any())
+                    if tree_batch and edge_distillation_enabled and not active_tree_kd:
+                        # No teacher forward is needed, but these GRPO rows belong in
+                        # the teacher-row-fraction denominator.
+                        self._edge_teacher_rows = getattr(self, "_edge_teacher_rows", 0)
+                        self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + responses.size(0)
                     if edge_distillation_enabled and edge_token_selection == "teacher_topk" and (not tree_batch or active_tree_kd):
                         # Same actor module under no_grad, evaluated before the student,
                         # but only on rows the gate activated (weight > 0): every other row

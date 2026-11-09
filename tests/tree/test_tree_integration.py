@@ -89,6 +89,8 @@ class Actor:
             tensors=dict(
                 prompts=b.batch["input_ids"],
                 responses=responses,
+                rollout_log_probs=torch.ones_like(responses, dtype=torch.float32)
+                * -0.5,
                 input_ids=ids,
                 attention_mask=mask,
                 position_ids=compute_position_id_with_mask(mask),
@@ -160,4 +162,36 @@ def test_prompt_current_step_only_and_no_cross_branch_T():
     assert "EXPERIENCE" not in noexp
     assert "EXPERIENCE" not in runner.build_prompt(
         SearchBranchState("q", "original", [], "nq"), memory
+    )
+
+
+def test_shared_prefix_copies_generation_logprobs():
+    from agent_system.tree.runner import pack_training_rows
+    from test_tree_method import example
+    from tempfile import TemporaryDirectory
+
+    tree = example((0, 0, 0), (0, 1))
+    for node in tree.nodes.values():
+        prompt = torch.ones(64, dtype=torch.long)
+        response = torch.ones(4, dtype=torch.long)
+        node.tensors = dict(
+            prompts=prompt,
+            responses=response,
+            input_ids=torch.cat([prompt, response]),
+            attention_mask=torch.ones(68, dtype=torch.long),
+            position_ids=torch.arange(68),
+            rollout_log_probs=torch.randn(4),
+        )
+    with TemporaryDirectory() as directory:
+        batch = pack_training_rows(
+            Collector(Path(directory)), tree, tree.expanded_rows()
+        )
+    indices = np.flatnonzero(batch.non_tensor_batch["node_id"] == "L")
+    assert len(indices) == 3
+    assert all(
+        torch.equal(
+            batch.batch["rollout_log_probs"][indices[0]],
+            batch.batch["rollout_log_probs"][i],
+        )
+        for i in indices
     )
