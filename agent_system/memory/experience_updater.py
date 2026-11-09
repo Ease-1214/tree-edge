@@ -57,7 +57,12 @@ class ExperienceUpdater:
             return []
 
         next_exp_idx = self._next_exp_index(current_experiences)
-        prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+        domain = self._prompt_domain(current_experiences)
+        if domain == "search":
+            prompt = self._build_search_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+        else:
+            prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+        self.last_prompt_domain = domain
 
         started = time.perf_counter()
         request_count_before = self._audit_request_count
@@ -73,6 +78,8 @@ class ExperienceUpdater:
             request_succeeded = True
             raw_experiences = self._parse_experiences_response(response.choices[0].message.content)
             parsed_count = len(raw_experiences)
+            if domain == "search":
+                raw_experiences = self._postprocess_search_experiences(raw_experiences, failed_trajectories)
             reassigned = self._reassign_exp_ids(raw_experiences, next_exp_idx)
             self.update_history.append(
                 {
@@ -225,6 +232,158 @@ Use example ids: {example_ids}
 
 Return ONLY a JSON array of experience objects.
 """
+
+    # ------------------------------------------------------------------ #
+    # Search-QA prompt (T064).  The upstream EDGE release only ships the  #
+    # ALFWorld prompt above; this is a domain adaptation with the same    #
+    # input selection (experience_hurt contrasts) and the same JSON       #
+    # schema, used identically by every method.                           #
+    # ------------------------------------------------------------------ #
+
+    SEARCH_TASK_TYPES = ("direct_retrieval", "entity_attribute_lookup", "multi_hop_reasoning", "comparison")
+
+    def _prompt_domain(self, current_experiences: Dict) -> str:
+        forced = os.environ.get("EDGE_REFLECTOR_PROMPT", "auto").lower()
+        if forced in ("search", "alfworld"):
+            return forced
+        env = ""
+        if isinstance(current_experiences, dict):
+            env = str((current_experiences.get("metadata") or {}).get("env") or "").lower()
+        return "search" if env == "search" else "alfworld"
+
+    @staticmethod
+    def _extract_answer(text: str) -> str:
+        m = re.findall(r"<answer>(.*?)</answer>", text or "", flags=re.S)
+        return m[-1].strip() if m else ""
+
+    def _experience_lookup(self, current_experiences: Dict) -> Dict[str, Dict]:
+        table = {}
+        for _, experience in self._iter_existing_experiences(current_experiences):
+            identifier = str(experience.get("experience_id") or "")
+            if identifier:
+                table[identifier] = experience
+        return table
+
+    def _format_search_example(self, idx: int, traj: Dict, lookup: Dict[str, Dict]) -> str:
+        pair = traj.get("paired_rollout", {}) or {}
+        with_exp = pair.get("with_experience", {}) or {}
+        without_exp = pair.get("without_experience", {}) or {}
+        context = str(traj.get("anchor_obs", "") or "")
+        if len(context) > 1500:
+            context = "..." + context[-1500:]
+        lines = [
+            f"\nExample {idx}:",
+            f"Question: {traj.get('task', '')}",
+            f"Question type (heuristic): {traj.get('task_type', 'unknown')}",
+            f"Context at this turn (tail, truncated): {context}",
+            "Experiences that were injected into the failed rollout:",
+        ]
+        for eid in with_exp.get("experience_ids", []) or []:
+            exp = lookup.get(str(eid), {})
+            trig = exp.get("trigger") or exp.get("when_to_apply") or exp.get("title") or ""
+            act = exp.get("recommended_action") or exp.get("principle") or ""
+            lines.append(f"  [{eid}] {trig} -> {act}")
+        lines.append(f"Rollout WITH experience (score={with_exp.get('score', '')}):\n  {with_exp.get('action', '')}")
+        lines.append(f"Rollout WITHOUT experience (score={without_exp.get('score', '')}):\n  {without_exp.get('action', '')}")
+        return "\n".join(lines) + "\n"
+
+    def _build_search_analysis_prompt(
+        self,
+        failed_trajectories: List[Dict],
+        current_experiences: Dict,
+        next_exp_idx: int,
+    ) -> str:
+        lookup = self._experience_lookup(current_experiences)
+        examples = [
+            self._format_search_example(i + 1, traj, lookup)
+            for i, traj in enumerate(failed_trajectories[:10])
+        ]
+        existing = []
+        for pool_name, experience in self._iter_existing_experiences(current_experiences):
+            trigger = experience.get("trigger") or experience.get("when_to_apply") or experience.get("title") or ""
+            recommended_action = experience.get("recommended_action") or experience.get("principle") or ""
+            identifier = experience.get("experience_id") or "unknown-id"
+            existing.append(f"- [{identifier}; {experience.get('task_type', 'unknown')}] {trigger} -> {recommended_action}")
+        example_ids = ", ".join(f'"exp_{next_exp_idx + j:06d}"' for j in range(self.max_new_experiences_per_update))
+        types = ", ".join(self.SEARCH_TASK_TYPES)
+        existing_text = "\n".join(existing) if existing else "(none)"
+
+        return f"""You are maintaining an experience bank for a search agent that answers open-domain questions.
+The agent works in turns: it reasons inside <think>...</think>, issues a search engine query inside <search>...</search>, reads the returned passages inside <information>...</information>, and finally answers inside <answer>...</answer>. A rollout is scored 1 if the final answer matches the reference and 0 otherwise.
+
+Each example below is a contrast on the SAME question and the SAME turn: the rollout that received the listed experiences failed, while the rollout without any experience succeeded. So the injected experience either misled the agent or failed to prevent a mistake.
+
+Your job: write reusable search strategies that would help on NEW questions of the same kind.
+
+Rules (strict):
+1. Generalize. Never copy any person, place, work, organization, date, number, or answer from the examples into the experience. Refer to them abstractly, e.g. "the person", "the film", "the second entity", "a year".
+2. One experience = one strategy for one question pattern. Do not merge unrelated examples into one experience. It is fine to produce fewer experiences than allowed.
+3. Explain the strategy through the agent's actions: how to phrase a search query, when to search again, how to check that a passage is about the right entity and relation, how to choose the answer span and its format.
+4. Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong. If an injected experience is simply wrong for this pattern, write the corrected strategy and state in avoid_action what not to do.
+5. Do not repeat an existing experience below; write only something new or a clearly better replacement.
+6. task_type must be one of: {types}.
+
+EXAMPLES:
+{''.join(examples)}
+EXISTING EXPERIENCES:
+{existing_text}
+
+Generate 1-{self.max_new_experiences_per_update} experiences. Each item must contain:
+- experience_id (use: {example_ids})
+- task_type (one of the allowed values)
+- trigger: the question pattern or turn situation where this applies, in general terms
+- recommended_action: what the agent should do (query phrasing / verification / answer selection)
+- avoid_action: the mistake to avoid
+- expected_effect: why this leads to a correct answer
+- state_cues: list of short general cues visible in the question or passages (no example-specific names)
+- retrieval_text: one or two general sentences used to match this experience to future questions
+- source_examples: list of the Example numbers this experience is based on (integers)
+
+Return ONLY a JSON array of experience objects.
+"""
+
+    def _postprocess_search_experiences(self, experiences: List[Dict], failed_trajectories: List[Dict]) -> List[Dict]:
+        """Map source example numbers to real trajectory ids, reset LLM-provided counters,
+        and drop experiences that copy an example's answer string verbatim."""
+        answers = set()
+        for traj in failed_trajectories[:10]:
+            pair = traj.get("paired_rollout", {}) or {}
+            for side in ("with_experience", "without_experience"):
+                ans = self._extract_answer((pair.get(side, {}) or {}).get("action", ""))
+                if len(ans) >= 3:
+                    answers.add(ans.lower())
+        kept = []
+        self.last_answer_leak_dropped = 0
+        for exp in experiences:
+            text = " ".join(
+                str(exp.get(k, "")) for k in ("trigger", "recommended_action", "avoid_action", "retrieval_text")
+            ) + " " + " ".join(str(c) for c in (exp.get("state_cues") or []))
+            low = text.lower()
+            if any(a in low for a in answers):
+                self.last_answer_leak_dropped += 1
+                continue
+            if exp.get("task_type") not in self.SEARCH_TASK_TYPES:
+                exp["task_type"] = "multi_hop_reasoning" if "hop" in low else "direct_retrieval"
+            sources = []
+            for n in exp.get("source_examples", []) or []:
+                try:
+                    traj = failed_trajectories[int(n) - 1]
+                except (ValueError, TypeError, IndexError):
+                    continue
+                for key in ("traj_uid", "no_exp_traj_uid"):
+                    if traj.get(key):
+                        sources.append(str(traj[key]))
+            exp["evidence"] = {
+                "positive_gain_count": 0,
+                "negative_gain_count": 0,
+                "source_traj_uids": sources,
+                "last_updated_step": None,  # set by the trainer to the real global step
+            }
+            exp.pop("source_examples", None)
+            kept.append(exp)
+        if self.last_answer_leak_dropped:
+            print(f"[ExperienceUpdater] dropped {self.last_answer_leak_dropped} experiences that copied an example answer", flush=True)
+        return kept
 
     def _format_failure_example(self, idx: int, traj: Dict) -> str:
         task = traj.get("task", "")

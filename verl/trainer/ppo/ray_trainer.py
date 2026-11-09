@@ -1672,7 +1672,10 @@ class RayPPOTrainer:
         task_type = task_type_col[exp_idx] if task_type_col is not None else self._detect_task_type_from_input(str(task or anchor_obs))
         admissible = non_tensor.get("admissible_actions", [None] * len(batch))[exp_idx]
 
+        traj_col = non_tensor.get("traj_uid", None)
         return {
+            "traj_uid": None if traj_col is None else str(traj_col[exp_idx]),
+            "no_exp_traj_uid": None if traj_col is None else str(traj_col[no_exp_idx]),
             "task": str(task or ""),
             "task_type": str(task_type or "unknown"),
             "anchor_obs": str(anchor_obs),
@@ -1763,8 +1766,18 @@ class RayPPOTrainer:
 
         if new_experiences:
             for exp in new_experiences:
-                exp.setdefault("evidence", {})
-                exp["evidence"].setdefault("last_updated_step", self.global_steps)
+                # Overwrite (not setdefault): the LLM returns last_updated_step=null, which
+                # left created_at_step at 0 and disabled the recent-experience protection.
+                evidence = exp.get("evidence")
+                if not isinstance(evidence, dict):
+                    evidence = {}
+                exp["evidence"] = evidence
+                evidence["last_updated_step"] = self.global_steps
+                evidence["positive_gain_count"] = 0
+                evidence["negative_gain_count"] = 0
+                if not isinstance(evidence.get("source_traj_uids"), list):
+                    evidence["source_traj_uids"] = []
+                exp["created_at_step"] = self.global_steps
             added = retrieval_memory.upsert_experiences(new_experiences)
             print(f"[ExperienceUpdate] Upserted {added} generated experiences")
         else:
