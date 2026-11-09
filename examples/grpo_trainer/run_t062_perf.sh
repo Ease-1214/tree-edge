@@ -35,7 +35,16 @@ RUN_DIR=$ROOT/runs/$PERF_TAG
 mkdir -p "$RUN_DIR"
 
 export PATH=/home/zehao/.conda/envs/tree-edge/bin:/home/zehao/miniforge3/bin:$PATH
-export EDGE_CONTROLLER_GPUS=1
+# Shared embedding service (T065): set EDGE_EMBED_URL=http://<host>:<port> to encode remotely;
+# the run then needs no auxiliary embedding GPU.
+if [[ -n "${EDGE_EMBED_URL:-}" ]]; then
+  export EDGE_CONTROLLER_GPUS=0
+  EMBED_HOST=$(python3 -c "import sys,urllib.parse as u; print(u.urlparse(sys.argv[1]).hostname)" "$EDGE_EMBED_URL")
+  export EDGE_EMBED_CLIENT=${EDGE_EMBED_CLIENT:-$PERF_TAG}
+else
+  export EDGE_CONTROLLER_GPUS=1
+  EMBED_HOST=
+fi
 export EDGE_EMBED_TOKEN_BUDGET=${EDGE_EMBED_TOKEN_BUDGET:-32768}  # padded tokens per embedding batch; halves itself on OOM
 export EDGE_EMBED_MAX_ROWS=${EDGE_EMBED_MAX_ROWS:-256}
 export EDGE_EMBED_DTYPE=${EDGE_EMBED_DTYPE:-bf16}
@@ -50,7 +59,7 @@ export TRAIN_DATA=$T061/data/train.parquet VAL_DATA=$T061/data/validation-smoke2
 export EMBEDDING_MODEL=$T061/assets/Qwen3-Embedding-0.6B
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SEARCH_URL=${SEARCH_URL:-http://127.0.0.1:29661/retrieve}
-export NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost
+export NO_PROXY=127.0.0.1,localhost${EMBED_HOST:+,$EMBED_HOST} no_proxy=127.0.0.1,localhost${EMBED_HOST:+,$EMBED_HOST}
 export N_GPUS_PER_NODE=$PERF_GPUS TRAIN_DATA_SIZE=$PERF_QUESTIONS VAL_DATA_SIZE=128 GROUP_SIZE=8
 # Optional server-local network settings contain no credentials.
 if [[ -f "$ROOT/wandb-online.env" ]]; then

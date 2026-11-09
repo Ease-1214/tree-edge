@@ -648,6 +648,37 @@ class ExperienceMemory(BaseMemory):
         uniq = np.stack([np.asarray(e, dtype=np.float32) for e in out], axis=0)
         return uniq[inverse]
 
+    def _encode_remote(self, base_url: str, texts: List[str], normalize_embeddings: bool = True):
+        """Encode through the shared stateless embedding service (EDGE_EMBED_URL).
+
+        Retries transient failures; never silently falls back to a local model, because
+        that would load the encoder onto a training GPU.
+        """
+        import base64
+        import time
+        import numpy as np
+
+        url = base_url.rstrip("/") + "/embed"
+        session = self._get_http_session(base_url)
+        payload = {
+            "texts": list(texts),
+            "normalize": bool(normalize_embeddings),
+            "client": os.environ.get("EDGE_EMBED_CLIENT", ""),
+        }
+        timeout = float(os.environ.get("EDGE_EMBED_TIMEOUT", "600"))
+        last_exc = None
+        for attempt in range(int(os.environ.get("EDGE_EMBED_RETRIES", "5"))):
+            try:
+                resp = session.post(url, json=payload, timeout=timeout)
+                resp.raise_for_status()
+                body = resp.json()
+                arr = np.frombuffer(base64.b64decode(body["data"]), dtype=np.float32)
+                return arr.reshape(body["shape"]).copy()
+            except Exception as exc:  # network blip or server restart
+                last_exc = exc
+                time.sleep(min(30.0, 2.0 * (attempt + 1)))
+        raise RuntimeError(f"embedding service {url} failed after retries: {last_exc!r}")
+
     def _encode_texts(self, texts: List[str], normalize_embeddings: bool = True):
         import faulthandler
         import time
@@ -667,6 +698,10 @@ class ExperienceMemory(BaseMemory):
 
         if not texts:
             return np.array([]).reshape(0, 0)
+
+        remote = os.environ.get("EDGE_EMBED_URL", "").strip()
+        if remote:
+            return self._encode_remote(remote, texts, normalize_embeddings)
 
         # Initialise before choosing the execution path.  Without this call,
         # the first (usually full-bank) encoding request would create multiple
