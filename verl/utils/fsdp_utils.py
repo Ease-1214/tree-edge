@@ -482,6 +482,9 @@ def layered_summon_lora_params(fsdp_module)->OrderedDict:
                 with FSDP.summon_full_params(submodule, writeback=False):
                     sub_lora_params = get_peft_model_state_dict(fsdp_module._fsdp_wrapped_module, state_dict=submodule.state_dict())
                     if not sub_lora_params:
+                        config = fsdp_module._fsdp_wrapped_module.peft_config["default"]
+                        if config.bias != "none" or config.use_dora:
+                            raise RuntimeError("Direct FSDP export requires standard bias-free LoRA")
                         sub_lora_params = {
                             key.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight"): value
                             for key, value in submodule.named_parameters()

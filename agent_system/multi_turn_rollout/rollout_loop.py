@@ -420,16 +420,7 @@ class TrajectoryCollector:
 
         global_step = gen_batch.meta_info.get('global_step', None)
         use_exp_rollout = self._is_exp_rollout_enabled(is_train, global_step=global_step)
-        # Once exp-rollout warmup ends, the existing injection helper returns
-        # an all-false mask.  Dynamic management needs that fact preserved in
-        # rollout metadata so it can emit a clean ``no A/B arms`` skip rather
-        # than treating the batch as malformed.  Keep legacy evolution's
-        # metadata behaviour unchanged while its new management mode is off.
-        dynamic_management_enabled = bool(
-            is_train
-            and self.config.env.get('experience_memory', {}).get('enable_dynamic_management', False)
-        )
-        attach_management_mask = dynamic_management_enabled and self._is_exp_rollout_configured(is_train)
+        # Preserve the injection mask in metadata, including all-false validation masks.
         use_edge_distillation = self._is_edge_distillation_enabled(is_train, global_step=global_step)
         experience_injection_mask = self._build_experience_injection_mask_for_rollout(batch_size, is_train, global_step=global_step)
         envs.set_experience_injection_mask(experience_injection_mask)
