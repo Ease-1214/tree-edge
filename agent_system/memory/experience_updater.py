@@ -439,13 +439,14 @@ What happens to what you write:
 
 How to work:
 1. For each example, compare the failed and the successful attempt and find the first turn where the failed one went wrong, e.g. a query that missed the key entity or relation, answering before the evidence was sufficient, searching again although the results already contained an answer that satisfied the question, picking the wrong entity, or giving the answer in the wrong form.
-2. Check the experiences that were in the failed attempt's prompt at that turn. If the agent was following one of them in a situation where it did not fit, your new entry should cover that same situation and say clearly what to do instead (and when the old advice does not apply), so that it is retrieved together with it and outweighs it. If no shown experience was relevant, write the missing strategy.
+2. Check the experiences that were in the failed attempt's prompt at that turn, to understand whether the agent was following advice that did not fit its situation or simply lacked a useful strategy. Either way, write an entry for that situation that states the right action directly. Do not mention or argue with other entries: it may be shown without them.
 3. Every entry must state WHEN it applies in terms the agent can check from the question and the search results it has so far (for example: "the results already name an entity that satisfies every condition in the question" vs "the results do not mention the second entity yet"). If the right move in that situation is to answer, say so explicitly.
 
 Rules (strict):
 - Generalize. Never copy any person, place, work, organization, date, number, or answer from the examples. Refer to them abstractly ("the person", "the second entity", "a year").
 - One experience = one strategy for one situation. Do not merge unrelated examples. Returning fewer experiences, or an empty array, is fine.
 - Do not repeat an existing experience; write only something new or a clearly better replacement.
+- Each entry must be self-contained: never refer to other entries, "previous advice", or "the tips above".
 - Write every field as direct advice to the agent. Never mention examples, attempts, batches, success rates, or how the experience was derived.
 - task_type must be one of: {types}.
 - experience_type must be "task" or "step":
