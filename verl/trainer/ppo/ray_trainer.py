@@ -2093,6 +2093,15 @@ class RayPPOTrainer:
         else:
             print(f"Warning: No dataloader state found at {dataloader_local_path}, will start from scratch")
 
+        # Restore the experience snapshot from the same checkpoint boundary.
+        if self.config.env.get("use_experience_memory", False):
+            retrieval_memory = getattr(self.envs, "retrieval_memory", None)
+            bank_path = os.path.join(checkpoint_folder, f"experience_bank_step{self.global_steps}.json")
+            if retrieval_memory is not None:
+                if not os.path.isfile(bank_path) or not retrieval_memory.load_experiences(bank_path):
+                    raise RuntimeError(f"Cannot restore checkpoint experience bank: {bank_path}")
+                print(f"[ExperienceMemory] Restored checkpoint bank at step {self.global_steps}", flush=True)
+
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
         attention_mask = batch.batch["attention_mask"]

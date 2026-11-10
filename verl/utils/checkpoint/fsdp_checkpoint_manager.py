@@ -92,6 +92,35 @@ class FSDPCheckpointManager(BaseCheckpointManager):
         if local_path is None:
             return
 
+        adapter_path = os.path.join(local_path, "lora_adapter", "adapter_model.safetensors")
+        if os.path.isfile(adapter_path) and not os.path.isfile(os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")):
+            from safetensors.torch import load_file
+            weights = load_file(adapter_path)
+            with FSDP.summon_full_params(self.model, writeback=True, rank0_only=False):
+                loaded = set()
+                with torch.no_grad():
+                    for name, parameter in self.model.named_parameters():
+                        if not parameter.requires_grad:
+                            continue
+                        canonical = name.replace("_fsdp_wrapped_module.", "").replace(".default.weight", ".weight")
+                        if canonical not in weights or weights[canonical].shape != parameter.shape:
+                            raise ValueError(f"Adapter parameter identity mismatch: {canonical}")
+                        parameter.copy_(weights[canonical].to(device=parameter.device, dtype=parameter.dtype))
+                        loaded.add(canonical)
+                if loaded != set(weights):
+                    raise ValueError("Adapter contains unconsumed tensors")
+            step = int(os.path.basename(os.path.dirname(local_path)).removeprefix("global_step_"))
+            from verl.utils.checkpoint.adapter_state import load_adapter_training_state
+            state_path = os.path.join(local_path,f"training_state_rank_{self.rank}.pt")
+            self.optimizer_restored = load_adapter_training_state(state_path,self.optimizer,self.lr_scheduler)
+            if not self.optimizer_restored:
+                import warnings
+                warnings.warn(f"Checkpoint {local_path} lacks optimizer/RNG state; reinitializing at step {step}")
+                if self.lr_scheduler is not None:self.lr_scheduler.step(step)
+            print(f"[rank-{self.rank}] Resumed LoRA at step {step}; optimizer_restored={int(self.optimizer_restored)}",flush=True)
+            torch.distributed.barrier()
+            return
+
         # every rank download its own checkpoint
         remote_model_path = os.path.join(local_path, f"model_world_size_{self.world_size}_rank_{self.rank}.pt")
         remote_optim_path = os.path.join(local_path, f"optim_world_size_{self.world_size}_rank_{self.rank}.pt")
