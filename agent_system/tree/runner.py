@@ -370,7 +370,16 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     tree.metrics.update(tree_progress_metrics(tree))
     if config.env.tree_experience.get("dedup_shared_prefix", False):
         from agent_system.tree.question_batches import prepare_dedup_batch
-        batch = prepare_dedup_batch(batch, tree, actor.world_size)
+
+        batch = prepare_dedup_batch(
+            batch,
+            tree,
+            actor.world_size,
+            batching=config.env.tree_experience.get(
+                "dedup_batching", "question_grouped"
+            ),
+            seed=int(config.env.get("seed", 0)) + step,
+        )
     collector.last_tree = tree
     root = Path(config.trainer.default_local_dir).parent / "tree-private"
     root.mkdir(parents=True, exist_ok=True)

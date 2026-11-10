@@ -76,7 +76,9 @@ def apply_exposure_counts(experiences, counts, step):
         for item in experiences.get(pool, []):
             n = counts.get(str(item.get("experience_id")))
             if n:
-                item["retrieval_count"] = int(item.get("retrieval_count", 0) or 0) + int(n)
+                item["retrieval_count"] = int(
+                    item.get("retrieval_count", 0) or 0
+                ) + int(n)
                 item["last_retrieval_step"] = int(step)
                 touched += 1
     return touched
@@ -121,6 +123,7 @@ def manage_tree_experiences(trainer, tree):
         beta=float(cfg.utility_ema_beta),
         min_questions=int(cfg.min_delete_questions),
         protect_recent_steps=int(cfg.protect_recent_steps),
+        max_delete_per_window=int(cfg.get("max_delete_per_window", 0)),
     )
     memory.replace_experiences_keep_cache_incremental(bank)
     metrics["bank/utility_updates"] = len(updates)

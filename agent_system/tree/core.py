@@ -232,7 +232,13 @@ class QuestionEvidence:
         )
 
     def merge_window(
-        self, bank, step, beta=0.1, min_questions=20, protect_recent_steps=20
+        self,
+        bank,
+        step,
+        beta=0.1,
+        min_questions=20,
+        protect_recent_steps=20,
+        max_delete_per_window=0,
     ):
         updates, removed = [], []
         for pool in ("task_experiences", "step_experiences"):
@@ -273,9 +279,24 @@ class QuestionEvidence:
                             **stats,
                         )
                     )
-                else:
-                    kept.append(item)
+                kept.append(item)
             bank[pool] = kept
+        if max_delete_per_window > 0:
+            removed = sorted(
+                removed,
+                key=lambda item: (
+                    item["upper_2se"],
+                    item["pool"],
+                    item["experience_id"],
+                ),
+            )[:max_delete_per_window]
+        selected = {(item["pool"], item["experience_id"]) for item in removed}
+        for pool in ("task_experiences", "step_experiences"):
+            bank[pool] = [
+                item
+                for item in bank[pool]
+                if (pool, item["experience_id"]) not in selected
+            ]
         self.state["pending"] = {}
         return updates, removed
 

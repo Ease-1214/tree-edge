@@ -648,7 +648,11 @@ class TrajectoryCollector:
             batch = pack_training_rows(self, tree, tree.expanded_rows())
             if self.config.env.tree_experience.get("dedup_shared_prefix", False):
                 from agent_system.tree.question_batches import prepare_dedup_batch
-                batch = prepare_dedup_batch(batch, tree, actor_rollout_wg.world_size)
+                batch = prepare_dedup_batch(
+                    batch, tree, actor_rollout_wg.world_size,
+                    batching=self.config.env.tree_experience.get("dedup_batching", "question_grouped"),
+                    seed=int(self.config.env.get("seed", 0)) + int(gen_batch.meta_info.get("global_step", 0)),
+                )
             self.last_tree = tree
             return batch
         from agent_system.tree.core import tree_enabled
