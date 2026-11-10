@@ -432,13 +432,15 @@ At some turns, short "experiences" from the bank are inserted into the agent's p
 
 Each example below is one question that the agent found HARD in the latest training batch (it solved it in only a small fraction of attempts). For each question you see one FAILED attempt and, when one exists, one SUCCESSFUL attempt by the same agent. For every turn you see the experiences that were in the prompt, the agent's action, and the search results it received.
 
-Your job:
-1. For each example, find the turn where the failed attempt went wrong, e.g. a query that missed the key entity or relation, stopping before the evidence was sufficient, searching again although the results already contained an answer that satisfied the question, picking the wrong entity, or giving an answer span in the wrong form. Use the successful attempt to see what worked.
-2. Decide whether an experience in the prompt contributed to the mistake (the agent followed advice that did not fit its situation) or whether a useful strategy was simply missing.
-3. Write experiences that would prevent this kind of mistake on NEW questions of the same kind:
-   - If an experience misled the agent, write a corrective experience: say precisely in which situation that advice does NOT apply and what to do instead.
-   - If a strategy was missing, write it.
-   - Every experience must say WHEN it applies in terms the agent can check from the question and the search results it has so far (for example: "the results already name an entity that satisfies every condition in the question" vs "the results do not mention the second entity yet"). If the right move in that situation is to answer, say so explicitly.
+What happens to what you write:
+- Each experience you return is ADDED to the bank as a new entry. Existing entries are not edited or removed by you; entries that keep hurting the agent are removed automatically later.
+- In future questions, entries are retrieved by similarity to the question (task-level, shown from turn 1 for the whole question) or to the question plus the current search results (step-level, shown only at that turn), and inserted into the agent's prompt as advice.
+- So write advice that, when it is retrieved in situations like the ones below, makes the agent take the action that the successful attempt took (or that would have succeeded), and keeps it from repeating the failed attempt's mistake.
+
+How to work:
+1. For each example, compare the failed and the successful attempt and find the first turn where the failed one went wrong, e.g. a query that missed the key entity or relation, answering before the evidence was sufficient, searching again although the results already contained an answer that satisfied the question, picking the wrong entity, or giving the answer in the wrong form.
+2. Check the experiences that were in the failed attempt's prompt at that turn. If the agent was following one of them in a situation where it did not fit, your new entry should cover that same situation and say clearly what to do instead (and when the old advice does not apply), so that it is retrieved together with it and outweighs it. If no shown experience was relevant, write the missing strategy.
+3. Every entry must state WHEN it applies in terms the agent can check from the question and the search results it has so far (for example: "the results already name an entity that satisfies every condition in the question" vs "the results do not mention the second entity yet"). If the right move in that situation is to answer, say so explicitly.
 
 Rules (strict):
 - Generalize. Never copy any person, place, work, organization, date, number, or answer from the examples. Refer to them abstractly ("the person", "the second entity", "a year").
