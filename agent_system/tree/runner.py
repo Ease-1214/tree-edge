@@ -368,6 +368,9 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
         "kd/canonical_rows": int(batch.batch["kd_canonical"].sum()),
     }
     tree.metrics.update(tree_progress_metrics(tree))
+    if config.env.tree_experience.get("dedup_shared_prefix", False):
+        from agent_system.tree.question_batches import prepare_dedup_batch
+        batch = prepare_dedup_batch(batch, tree, actor.world_size)
     collector.last_tree = tree
     root = Path(config.trainer.default_local_dir).parent / "tree-private"
     root.mkdir(parents=True, exist_ok=True)

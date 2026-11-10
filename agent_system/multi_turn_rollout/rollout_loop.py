@@ -640,6 +640,17 @@ class TrajectoryCollector:
         Returns:
             DataProto: Final collected trajectory data with metadata.
         """
+        import os
+        if is_train and os.environ.get("T066_REPLAY_TREE"):
+            import torch
+            from agent_system.tree.runner import pack_training_rows
+            tree = torch.load(os.environ["T066_REPLAY_TREE"], map_location="cpu", weights_only=False)
+            batch = pack_training_rows(self, tree, tree.expanded_rows())
+            if self.config.env.tree_experience.get("dedup_shared_prefix", False):
+                from agent_system.tree.question_batches import prepare_dedup_batch
+                batch = prepare_dedup_batch(batch, tree, actor_rollout_wg.world_size)
+            self.last_tree = tree
+            return batch
         from agent_system.tree.core import tree_enabled
         if is_train and tree_enabled(self.config, gen_batch.meta_info.get("global_step", 0)):
             from agent_system.tree.runner import tree_multi_turn_loop

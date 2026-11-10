@@ -110,9 +110,14 @@ class FSDPCheckpointManager(BaseCheckpointManager):
                 if loaded != set(weights):
                     raise ValueError("Adapter contains unconsumed tensors")
             step = int(os.path.basename(os.path.dirname(local_path)).removeprefix("global_step_"))
-            if self.lr_scheduler is not None:
-                self.lr_scheduler.step(step)
-            print(f"[rank-{self.rank}] Resumed LoRA at step {step}; optimizer and RNG reinitialized because checkpoint is adapter-only", flush=True)
+            from verl.utils.checkpoint.adapter_state import load_adapter_training_state
+            state_path = os.path.join(local_path,f"training_state_rank_{self.rank}.pt")
+            self.optimizer_restored = load_adapter_training_state(state_path,self.optimizer,self.lr_scheduler)
+            if not self.optimizer_restored:
+                import warnings
+                warnings.warn(f"Checkpoint {local_path} lacks optimizer/RNG state; reinitializing at step {step}")
+                if self.lr_scheduler is not None:self.lr_scheduler.step(step)
+            print(f"[rank-{self.rank}] Resumed LoRA at step {step}; optimizer_restored={int(self.optimizer_restored)}",flush=True)
             torch.distributed.barrier()
             return
 

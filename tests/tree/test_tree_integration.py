@@ -195,3 +195,30 @@ def test_shared_prefix_copies_generation_logprobs():
         )
         for i in indices
     )
+
+
+def test_dedup_rank_bins_and_trace(tmp_path,monkeypatch):
+    from agent_system.tree.question_batches import prepare_dedup_batch
+    from test_tree_method import example
+    from agent_system.tree.runner import pack_training_rows
+    from copy import deepcopy
+    from agent_system.tree.core import TreeRollout
+    full=TreeRollout()
+    for q in range(32):
+        one=example((0,0,0),(0,1))
+        mapping={k:str(q)+":"+k for k in one.nodes}
+        for k,node in one.nodes.items():
+            node.uid=str(q);node.node_id=mapping[k];node.fork_id=str(q)+":fork"
+            prompt=torch.ones(64,dtype=torch.long);response=torch.ones(4,dtype=torch.long)
+            node.tensors=dict(prompts=prompt,responses=response,input_ids=torch.cat([prompt,response]),attention_mask=torch.ones(68,dtype=torch.long),position_ids=torch.arange(68))
+            full.nodes[node.node_id]=node
+        fork=one.forks["fork"];fork.uid=str(q);fork.fork_id=str(q)+":fork";fork.left_node_id=mapping["L"];fork.right_node_id=mapping["R"]
+        full.forks[fork.fork_id]=fork
+        for leaf in one.leaves:
+            leaf.uid=str(q);leaf.leaf_id=str(q)+":"+leaf.leaf_id;leaf.node_ids=tuple(mapping[n] for n in leaf.node_ids);full.leaves.append(leaf)
+    full.evaluate_forks();rows=full.expanded_rows();batch=pack_training_rows(Collector(tmp_path),full,rows)
+    packed=prepare_dedup_batch(batch,full,4)
+    assert packed.batch["w_tok"].sum()==len(rows)
+    assert packed.batch["kd_canonical"].sum()==32
+    assert len(packed)%16==0
+    for rank in packed.chunk(4):assert rank.batch["dedup_mini"].unique().numel()==1

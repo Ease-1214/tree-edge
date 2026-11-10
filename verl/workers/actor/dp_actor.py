@@ -621,6 +621,9 @@ class DataParallelPPOActor(BasePPOActor):
         if tree_batch:
             select_keys.extend(["kd_student_input_ids", "kd_student_attention_mask", "kd_student_position_ids",
                 "kd_canonical", "kd_path_has_T", "is_padding_copy"])
+        dedup = "w_tok" in data.batch
+        if dedup:
+            select_keys.extend(["w_tok", "A_pos", "A_neg", "dedup_mini", "dedup_mini_weight"])
         self._tree_monitoring = tree_batch
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -632,7 +635,7 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys = ["multi_modal_inputs"]
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
         else:
-            dataloader = batch.split(self.config.ppo_mini_batch_size)
+            dataloader = [batch[batch["dedup_mini"] == mini] for mini in batch["dedup_mini"].unique(sorted=True)] if dedup else batch.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
         micro_batch_count = 0
@@ -752,6 +755,10 @@ class DataParallelPPOActor(BasePPOActor):
                         loss_agg_mode=loss_agg_mode,
                     )
 
+                    if dedup:
+                        from agent_system.tree.dedup import weighted_node_policy_loss
+                        pg_loss = weighted_node_policy_loss(old_log_prob,log_prob,data["A_pos"],data["A_neg"],response_mask,data["w_tok"],clip_ratio_low,clip_ratio_high,clip_ratio_c)
+
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
@@ -775,7 +782,7 @@ class DataParallelPPOActor(BasePPOActor):
                             if active_tree_kd:
                                 from agent_system.tree.loss import tree_topk_loss, tree_kd_metrics
                                 edge_loss, tree_kl, tree_gradient = tree_topk_loss(tree_student_logits,
-                                    teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask)
+                                    teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask)
                                 edge_metrics = tree_kd_metrics(tree_kl, tree_student_mass, data["edge_distill_weight"],
                                     response_mask, data["kd_path_has_T"], tree_gap, tree_gradient,
                                     teacher_topk_ids, responses, advantages)
@@ -811,7 +818,7 @@ class DataParallelPPOActor(BasePPOActor):
 
                     if self.config.use_dynamic_bsz:
                         # relative to the dynamic bsz
-                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        loss = policy_loss * (data["w_tok"].sum() / data["dedup_mini_weight"][0] if dedup else len(data) / self.config.ppo_mini_batch_size)
                     else:
                         loss = policy_loss / self.gradient_accumulation
                     loss.backward()
@@ -827,6 +834,7 @@ class DataParallelPPOActor(BasePPOActor):
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
+                print(f"T066_MINI index={batch_idx} pg_loss={metrics.get('actor/pg_loss', [])} grad_norm={float(grad_norm)}", flush=True)
         self.actor_optimizer.zero_grad()
         if getattr(self, "_edge_teacher_rows_total", 0):
             metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total

@@ -315,6 +315,7 @@ env:
   history_length: 2
   use_experience_memory: False
   tree_experience:
+    dedup_shared_prefix: False
     enable: False
     task_top_k: 4
     step_top_k: 6
