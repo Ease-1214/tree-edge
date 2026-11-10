@@ -13,8 +13,8 @@ S+1..T. Instead, create a NEW run that contains history 1..S and let training re
     # prints NEW_ID; then start training with
     #   WANDB_RUN_ID=NEW_ID WANDB_RESUME=must   (same project / name / group / tags)
 
-The old run is kept (never deleted): its group becomes "<group>-superseded" and it gets
-the tag "superseded", so the t066 view shows only the live run.
+The old run is kept. By default it moves to "<group>-superseded".
+With --keep-source it stays in the comparison group and gets question_grouped.
 """
 import argparse
 
@@ -32,6 +32,7 @@ def main():
     ap.add_argument("--tags", default="")
     ap.add_argument("--notes", default="")
     ap.add_argument("--mode", choices=["fork", "copy"], required=True)
+    ap.add_argument("--keep-source", action="store_true", help="Keep the source as a comparison run")
     args = ap.parse_args()
     tags = [t for t in args.tags.split(",") if t]
     api = wandb.Api()
@@ -58,8 +59,8 @@ def main():
     new_id = run.id
     run.finish()
 
-    old.group = args.group + "-superseded"
-    old.tags = list(set(list(old.tags) + ["superseded"]))
+    old.group = args.group if args.keep_source else args.group + "-superseded"
+    old.tags = sorted(set(list(old.tags) + (["question_grouped"] if args.keep_source else ["superseded"])))
     old.update()
     print(f"NEW_RUN_ID={new_id}")
 
