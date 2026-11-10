@@ -9,6 +9,8 @@ import json
 import os
 import re
 import time
+import threading
+import queue
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -35,7 +37,7 @@ class ExperienceUpdater:
                 "EXPERIENCE_UPDATE_BASE_URL, and EXPERIENCE_UPDATE_MODEL environment variables."
             )
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=285.0)
         self._audit_request_count = 0
         if os.environ.get("T063_REFLECTOR_AUDIT") == "1":
             self.client._client.event_hooks.setdefault("request", []).append(self._audit_request)
@@ -48,6 +50,31 @@ class ExperienceUpdater:
     def _audit_request(self, request):
         self._audit_request_count += 1
 
+    def _completion_with_deadline(self, request_kwargs, total_seconds=300.0):
+        if getattr(self, "_request_thread", None) is not None and self._request_thread.is_alive():
+            raise TimeoutError("Previous reflector request is still ending")
+        results = queue.Queue(maxsize=1)
+        deadline = time.time() + total_seconds
+
+        def request():
+            try:
+                client = self.client.with_options(
+                    max_retries=0, timeout=max(0.1, total_seconds - 10),
+                    default_headers={"X-Echo-Deadline": str(deadline)})
+                results.put((True, client.chat.completions.create(**request_kwargs)))
+            except Exception as error:
+                results.put((False, error))
+
+        self._request_thread = threading.Thread(target=request, daemon=True)
+        self._request_thread.start()
+        try:
+            ok, result = results.get(timeout=total_seconds)
+        except queue.Empty:
+            raise TimeoutError("Reflector exceeded its total request deadline") from None
+        if not ok:
+            raise result
+        return result
+
     def analyze_failures(
         self,
         failed_trajectories: List[Dict],
@@ -56,27 +83,36 @@ class ExperienceUpdater:
         if not failed_trajectories:
             return []
 
-        next_exp_idx = self._next_exp_index(current_experiences)
-        domain = self._prompt_domain(current_experiences)
-        if domain == "search" and any(t.get("mode") == "trajectory_pair" for t in failed_trajectories):
-            prompt = self._build_trajectory_pair_prompt(failed_trajectories, current_experiences, next_exp_idx)
-        elif domain == "search":
-            prompt = self._build_search_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
-            if any(traj.get("fork_id") for traj in failed_trajectories):
-                old_description = "Each example below is a contrast on the SAME question and the SAME turn: the rollout that received the listed experiences failed, while the rollout without any experience succeeded. So the injected experience either misled the agent or failed to prevent a mistake."
-                new_description = "Each example is a fork at one identical search state. LEFT omits only this turn's new experiences; RIGHT adds them. Both sides may retain earlier task experience. The actions shown are this turn's real actions; scores are terminal subtree success fractions. Delta=RIGHT-LEFT can show helped, harmed, or neutral evidence. Distill a reusable strategy from either sign without treating a noisy fork as certain causality."
-                prompt = prompt.replace(old_description, new_description)
-                prompt = prompt.replace("Generate 1-", "Generate 0-")
-                prompt += "\nFor each object include experience_type: task or step. task is a reusable multi-turn solving strategy, usually from a root fork. step is an action or warning for a concrete state, usually from an internal fork. You may return an empty array and need not produce both types.\n"
-                prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience. Write every field as direct advice to the agent: never mention forks, LEFT/RIGHT, scores, subtree success, examples, or why this experience was derived.")
-        else:
-            prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
-        self.last_prompt_domain = domain
+        self.last_update_succeeded = False
+        self.last_failure_reason = None
+        try:
+            next_exp_idx = self._next_exp_index(current_experiences)
+            domain = self._prompt_domain(current_experiences)
+            if domain == "search" and any(t.get("mode") == "trajectory_pair" for t in failed_trajectories):
+                prompt = self._build_trajectory_pair_prompt(failed_trajectories, current_experiences, next_exp_idx)
+            elif domain == "search":
+                prompt = self._build_search_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+                if any(traj.get("fork_id") for traj in failed_trajectories):
+                    old_description = "Each example below is a contrast on the SAME question and the SAME turn: the rollout that received the listed experiences failed, while the rollout without any experience succeeded. So the injected experience either misled the agent or failed to prevent a mistake."
+                    new_description = "Each example is a fork at one identical search state. LEFT omits only this turn's new experiences; RIGHT adds them. Both sides may retain earlier task experience. The actions shown are this turn's real actions; scores are terminal subtree success fractions. Delta=RIGHT-LEFT can show helped, harmed, or neutral evidence. Distill a reusable strategy from either sign without treating a noisy fork as certain causality."
+                    prompt = prompt.replace(old_description, new_description)
+                    prompt = prompt.replace("Generate 1-", "Generate 0-")
+                    prompt += "\nFor each object include experience_type: task or step. task is a reusable multi-turn solving strategy, usually from a root fork. step is an action or warning for a concrete state, usually from an internal fork. You may return an empty array and need not produce both types.\n"
+                    prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience. Write every field as direct advice to the agent: never mention forks, LEFT/RIGHT, scores, subtree success, examples, or why this experience was derived.")
+            else:
+                prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+            self.last_prompt_domain = domain
+
+        except (ValueError, TypeError) as error:
+            self.last_failure_reason = "prompt_" + type(error).__name__
+            print(f"[ExperienceUpdater] prompt construction failed: {type(error).__name__}", flush=True)
+            return []
 
         started = time.perf_counter()
         request_count_before = self._audit_request_count
         parsed_count = 0
         self.last_update_succeeded = False
+        self.last_failure_reason = None
         request_succeeded = False
         try:
             request_kwargs = {
@@ -84,11 +120,13 @@ class ExperienceUpdater:
                 "messages": [{"role": "user", "content": prompt}],
                 self.token_limit_param: self.max_completion_tokens,
             }
-            response = self.client.chat.completions.create(**request_kwargs)
+            response = self._completion_with_deadline(request_kwargs)
             request_succeeded = True
             raw_experiences = self._parse_experiences_response(response.choices[0].message.content)
             parsed_count = len(raw_experiences)
             self.last_update_succeeded = self.last_parse_succeeded
+            if not self.last_parse_succeeded:
+                self.last_failure_reason = "invalid_response_schema"
             if domain == "search":
                 raw_experiences = self._postprocess_search_experiences(raw_experiences, failed_trajectories)
             reassigned = self._reassign_exp_ids(raw_experiences, next_exp_idx)
@@ -101,6 +139,7 @@ class ExperienceUpdater:
             )
             return reassigned[: self.max_new_experiences_per_update]
         except Exception as e:
+            self.last_failure_reason = type(e).__name__
             safe_error = str(e).replace(self.client.api_key, "[REDACTED]")
             print(f"[ExperienceUpdater] Error calling {self.model}: {safe_error}")
             return []
@@ -383,15 +422,20 @@ Return ONLY a JSON array of experience objects.
                 return think, kind, m[-1].strip()
         return think, "invalid", text.strip()[-200:]
 
-    def _format_turns(self, turns: List[Dict]) -> List[str]:
+    def _format_turns(self, turns: List[Dict], observation_limit: int = 1200) -> List[str]:
         lines = []
         for t in turns:
             lines.append(f"  Turn {t['depth']}:")
-            if t.get("task_experiences"):
-                lines.append("    Task-level experience in prompt: " + " | ".join(x[:220] for x in t["task_experiences"]))
-            if t.get("step_experiences"):
-                lines.append("    Step-level experience in prompt: " + " | ".join(x[:220] for x in t["step_experiences"]))
-            if not t.get("task_experiences") and not t.get("step_experiences"):
+            if "task_experience_ids" in t:
+                lines.append("    Task-level experience IDs: " + ", ".join(t["task_experience_ids"]))
+                lines.append("    Step-level experience IDs: " + ", ".join(t["step_experience_ids"]))
+            else:
+                for kind in ("task", "step"):
+                    entries = t.get(kind + "_experiences") or []
+                    if entries:
+                        lines.append("    " + kind + " experience excerpts: " + " | ".join(
+                            x[:220] + (" [TRUNCATED]" if len(x) > 220 else "") for x in entries))
+            if not t.get("experience_ids") and not t.get("task_experiences") and not t.get("step_experiences"):
                 lines.append("    Experience in prompt: (none)")
             think, kind, content = self._split_action(t.get("action", ""))
             if think:
@@ -399,10 +443,10 @@ Return ONLY a JSON array of experience objects.
             lines.append(f"    Action: {kind} -> {content[:300]}")
             obs = (t.get("observation") or "").strip()
             if kind == "search" and obs:
-                lines.append(f"    Search results (truncated): {obs[:450]}")
+                lines.append(f"    Search results: {obs[:observation_limit]}" + (" [TRUNCATED]" if len(obs) > observation_limit else ""))
         return lines
 
-    def _build_trajectory_pair_prompt(self, examples: List[Dict], current_experiences: Dict, next_exp_idx: int) -> str:
+    def _build_trajectory_pair_prompt(self, examples: List[Dict], current_experiences: Dict, next_exp_idx: int, observation_limit: int = 1200) -> str:
         blocks = []
         for i, ex in enumerate(examples[:10]):
             rate = ex.get("leaf_success_rate", 0.0)
@@ -410,10 +454,10 @@ Return ONLY a JSON array of experience objects.
                  f"Question: {ex.get('task', '')}",
                  f"How often the agent solved it in this batch: {rate:.0%} of {ex.get('n_leaves', 0)} attempts",
                  "FAILED attempt:"]
-            b += self._format_turns(ex.get("failed_turns") or [])
+            b += self._format_turns(ex.get("failed_turns") or [], observation_limit)
             if ex.get("success_turns"):
                 b.append("SUCCESSFUL attempt (same question, same agent):")
-                b += self._format_turns(ex["success_turns"])
+                b += self._format_turns(ex["success_turns"], observation_limit)
                 b.append(f"The two attempts are identical up to turn {ex.get('divergence_depth', 1) - 1} and differ from turn {ex.get('divergence_depth', 1)} on.")
             else:
                 b.append("No successful attempt exists for this question in this batch.")
@@ -424,28 +468,40 @@ Return ONLY a JSON array of experience objects.
             action = experience.get("recommended_action") or experience.get("principle") or ""
             kind = "task" if pool_name == "task_experiences" else "step"
             existing.append(f"- [{experience.get('experience_id', '?')}; {kind}; {experience.get('task_type', 'unknown')}] {trigger} -> {action}")
+        known_ids = {str(e.get("experience_id")) for _, e in self._iter_existing_experiences(current_experiences)}
+        removed_catalog = {}
+        for ex in examples[:10]:
+            for key in ("failed_turns", "success_turns"):
+                for turn in ex.get(key) or []:
+                    for kind in ("task", "step"):
+                        for identifier, description in zip(turn.get(kind + "_experience_ids", []), turn.get(kind + "_experiences", [])):
+                            if identifier not in known_ids:
+                                removed_catalog[identifier] = f"- [{identifier}; {kind}; no longer in current bank] {description}"
+        if removed_catalog:
+            existing.append("Entries used in these trajectories that have since been removed from the bank:")
+            existing.extend(removed_catalog.values())
         example_ids = ", ".join(f'"exp_{next_exp_idx + j:06d}"' for j in range(self.max_new_experiences_per_update))
         types = ", ".join(self.SEARCH_TASK_TYPES)
-        return f"""You maintain an experience bank for a search agent that answers open-domain questions.
+        prompt = f"""You maintain an experience bank for a search agent that answers open-domain questions.
 The agent works in turns (at most 4): it reasons inside <think>...</think>, then either issues a search query inside <search>...</search> and reads the returned passages, or gives a final answer inside <answer>...</answer>. An answer scores 1 only if it exactly matches the reference answer; running out of turns without answering scores 0.
 At some turns, short "experiences" from the bank are inserted into the agent's prompt. Task-level experiences are chosen once at turn 1 and stay in the prompt for the whole question; step-level experiences are chosen for the current turn only.
 
-Each example below is one question that the agent found HARD in the latest training batch (it solved it in only a small fraction of attempts). For each question you see one FAILED attempt and, when one exists, one SUCCESSFUL attempt by the same agent. For every turn you see the experiences that were in the prompt, the agent's action, and the search results it received.
+Each example below is selected from the lowest-success questions in the latest batch that still have both successful and failed leaves. Leaves can share prefixes and are not independent repeated trials. For each question you see one FAILED attempt and, when one exists, one SUCCESSFUL attempt by the same agent. For every turn you see the IDs of the experiences that were in the prompt, the agent's action, and the search results it received. Resolve these IDs using EXPERIENCE CATALOG below; an empty list means none were injected.
 
 What happens to what you write:
 - Each experience you return is ADDED to the bank as a new entry. Existing entries are not edited or removed by you; entries that keep hurting the agent are removed automatically later.
 - In future questions, entries are retrieved by similarity to the question (task-level, shown from turn 1 for the whole question) or to the question plus the current search results (step-level, shown only at that turn), and inserted into the agent's prompt as advice.
-- So write advice that, when it is retrieved in situations like the ones below, makes the agent take the action that the successful attempt took (or that would have succeeded), and keeps it from repeating the failed attempt's mistake.
+- So write advice that, when it is retrieved in situations like the ones below, helps the agent choose an evidence-supported action and avoid a clearly identified mistake.
 
 How to work:
-1. For each example, compare the failed and the successful attempt and find the first turn where the failed one went wrong, e.g. a query that missed the key entity or relation, answering before the evidence was sufficient, searching again although the results already contained an answer that satisfied the question, picking the wrong entity, or giving the answer in the wrong form.
-2. Check the experiences that were in the failed attempt's prompt at that turn, to understand whether the agent was following advice that did not fit its situation or simply lacked a useful strategy. Either way, write an entry for that situation that states the right action directly. Do not mention or argue with other entries: it may be shown without them.
+1. Compare the two attempts and look for a strategy difference supported by the visible evidence. A successful outcome does not prove that every action in that attempt was better, and a failed outcome does not prove that an earlier action was wrong. Identify a specific mistake only when the evidence supports it, e.g. a query that missed the key entity or relation, answering before the evidence was sufficient, searching again although the results already contained an answer that satisfied the question, picking the wrong entity, or giving the answer in the wrong form.
+If both attempts are reasonable, or the evidence does not support a reusable lesson, return no experience for that example.\n2. Check the experiences that were in the failed attempt's prompt at that turn, to understand whether the agent was following advice that did not fit its situation or simply lacked a useful strategy. Either way, write an entry for that situation that states the right action directly. Do not mention or argue with other entries: it may be shown without them.
 3. Every entry must state WHEN it applies in terms the agent can check from the question and the search results it has so far (for example: "the results already name an entity that satisfies every condition in the question" vs "the results do not mention the second entity yet"). If the right move in that situation is to answer, say so explicitly.
 
-Rules (strict):
+Some search results and experience descriptions are marked [TRUNCATED]. Omitted evidence is unknown, not absent. Do not infer that the full observation lacked an answer, or that an experience lacked a condition, solely because it is missing from a truncated excerpt.\n\nRules (strict):
 - Generalize. Never copy any person, place, work, organization, date, number, or answer from the examples. Refer to them abstractly ("the person", "the second entity", "a year").
 - One experience = one strategy for one situation. Do not merge unrelated examples. Returning fewer experiences, or an empty array, is fine.
-- Do not repeat an existing experience; write only something new or a clearly better replacement.
+- Add only a strategy with substantive information not already covered by existing experiences, such as a new applicable condition or a distinct useful action. Rewording alone is not a new experience. Existing entries remain in the bank; do not write a supposed replacement that would merely duplicate or contradict them.
 - Each entry must be self-contained: never refer to other entries, "previous advice", or "the tips above".
 - Write every field as direct advice to the agent. Never mention examples, attempts, batches, success rates, or how the experience was derived.
 - task_type must be one of: {types}.
@@ -456,7 +512,7 @@ Rules (strict):
 EXAMPLES:
 {''.join(blocks)}
 
-EXISTING EXPERIENCES:
+EXPERIENCE CATALOG (current bank, followed by any removed entries used in these trajectories):
 {chr(10).join(existing) if existing else '(none)'}
 
 Generate 0-{self.max_new_experiences_per_update} experiences. Each item must contain:
@@ -473,6 +529,22 @@ Generate 0-{self.max_new_experiences_per_update} experiences. Each item must con
 
 Return ONLY a JSON array of experience objects.
 """
+
+        if len(prompt) > 60000:
+            search_turns = sum(
+                bool(t.get("observation")) and "<search>" in t.get("action", "")
+                for ex in examples[:10]
+                for key in ("failed_turns", "success_turns")
+                for t in (ex.get(key) or [])
+            )
+            reduction = max(1, (len(prompt) - 60000 + max(1, search_turns) - 1) // max(1, search_turns))
+            smaller = max(128, observation_limit - reduction)
+            if smaller >= observation_limit:
+                raise ValueError("Reflector prompt exceeds 60000 characters after observation truncation")
+            return self._build_trajectory_pair_prompt(examples, current_experiences, next_exp_idx, smaller)
+        self.last_prompt_chars = len(prompt)
+        self.last_observation_char_limit = observation_limit
+        return prompt
 
     def _postprocess_search_experiences(self, experiences: List[Dict], failed_trajectories: List[Dict]) -> List[Dict]:
         """Map source example numbers to real trajectory ids, reset LLM-provided counters,

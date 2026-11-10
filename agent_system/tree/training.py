@@ -8,8 +8,7 @@ import os
 import statistics
 from agent_system.tree.core import (
     QuestionEvidence,
-    fork_reflector_examples,
-    select_reflector_examples,
+    trajectory_reflector_examples,
 )
 
 
@@ -92,7 +91,7 @@ def manage_tree_experiences(trainer, tree):
     exposure_counts = tree_exposure_counts(tree)
     exposed = apply_exposure_counts(memory.experiences, exposure_counts, step)
     evidence.record(tree.question_credits())
-    evidence.state["contrasts"].extend(fork_reflector_examples(tree))
+    evidence.state["contrasts"] = []
     metrics = dict(
         tree.metrics,
         **{
@@ -102,8 +101,7 @@ def manage_tree_experiences(trainer, tree):
             "bank/added": 0.0,
             "bank/deleted_negative": 0.0,
             "bank/deleted_capacity": 0.0,
-            "reflector/candidates_positive": 0,
-            "reflector/candidates_negative": 0,
+            "reflector/failed": 0,
             "reflector/submitted": 0,
             "reflector/added_task": 0,
             "reflector/added_step": 0,
@@ -125,19 +123,9 @@ def manage_tree_experiences(trainer, tree):
     memory.replace_experiences_keep_cache_incremental(bank)
     metrics["bank/utility_updates"] = len(updates)
     metrics["bank/deleted_negative"] = len(negative)
-    contrasts = select_reflector_examples(evidence.state["contrasts"])
-    metrics["reflector/candidates_positive"] = sum(x["delta"] > 0 for x in contrasts)
-    metrics["reflector/candidates_negative"] = sum(x["delta"] < 0 for x in contrasts)
-    rates = defaultdict(list)
-    for leaf in tree.leaves:
-        rates[leaf.data_source].append(leaf.reward)
-    allowed = any(
-        statistics.mean(x)
-        < float(trainer.config.env.experience_memory.update_threshold)
-        for x in rates.values()
-    )
-    metrics["reflector/skip_reason"] = 1 if not contrasts else 2 if not allowed else 0
-    if contrasts and allowed:
+    contrasts = trajectory_reflector_examples(tree, k=10, seed=step, zero_success_quota=0)
+    metrics["reflector/skip_reason"] = 0 if contrasts else 1
+    if contrasts:
         metrics["reflector/submitted"] = len(contrasts)
         if not hasattr(trainer, "experience_updater"):
             from agent_system.memory.experience_updater import ExperienceUpdater
@@ -153,14 +141,7 @@ def manage_tree_experiences(trainer, tree):
         additions = trainer.experience_updater.analyze_failures(
             contrasts, memory.experiences
         )
-        failures = evidence.state.get("reflector_failed_windows", 0)
-        evidence.state["reflector_failed_windows"] = (
-            0 if trainer.experience_updater.last_update_succeeded else failures + 1
-        )
-        if evidence.state["reflector_failed_windows"] >= 2:
-            raise RuntimeError(
-                "Reflector failed to parse two consecutive update windows"
-            )
+        metrics["reflector/failed"] = int(not trainer.experience_updater.last_update_succeeded)
         metrics.update(write_new_experiences(memory, additions, step))
     evidence.state["contrasts"] = []
     capacity = memory.evict_excess_experiences(
@@ -185,7 +166,7 @@ def manage_tree_experiences(trainer, tree):
         metrics["bank/utility_positive_rate"] = statistics.mean(
             u > 0 for u in utilities
         )
-    metrics["bank/reflector_allowed"] = float(bool(contrasts and allowed))
+    metrics["bank/reflector_allowed"] = float(bool(contrasts))
     root = Path(trainer.config.trainer.default_local_dir)
     record = dict(
         step=step,
@@ -194,7 +175,8 @@ def manage_tree_experiences(trainer, tree):
         deleted_negative=negative,
         deleted_capacity=capacity,
         evidence=evidence.state,
-        reflector_fork_ids=[x["fork_id"] for x in contrasts],
+        reflector_source_leaf_ids=[x["source_leaf_ids"] for x in contrasts],
+        reflector_failure_reason=getattr(getattr(trainer, "experience_updater", None), "last_failure_reason", None),
     )
     atomic_json(root / f"tree_management_step{step}.json", record)
     memory.save_experiences(str(root / f"experience_bank_step{step}.json"))

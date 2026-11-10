@@ -106,6 +106,15 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
         self.device_name = get_device_name()
+        from verl.utils.replica_sync import uses_explicit_replica_sync
+        self._explicit_replica_sync = uses_explicit_replica_sync(self.actor_module)
+        if self._explicit_replica_sync:
+            if self.use_ulysses_sp or self.config.loss_agg_mode != "token-mean":
+                raise ValueError("Explicit full-replica synchronization requires token-mean loss and SP=1")
+            for parameter in self.actor_module.parameters():
+                if parameter.requires_grad:
+                    torch.distributed.broadcast(parameter.data, src=0)
+            print("T069_SYNC explicit global replica averaging enabled", flush=True)
 
     def _forward_response_only_rmpad(
         self,
@@ -448,7 +457,12 @@ class DataParallelPPOActor(BasePPOActor):
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
 
-        if isinstance(self.actor_module, FSDP):
+        if getattr(self, "_explicit_replica_sync", False):
+            from verl.utils.replica_sync import average_replica_gradients
+            average_replica_gradients(self.actor_module)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.actor_module.parameters(), max_norm=self.config.grad_clip)
+        elif isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         elif isinstance(self.actor_module, FSDPModule):
             grad_norm = fsdp2_clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
@@ -457,6 +471,8 @@ class DataParallelPPOActor(BasePPOActor):
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
+            if getattr(self, "_explicit_replica_sync", False):
+                raise FloatingPointError("Non-finite globally synchronized actor gradient")
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
@@ -587,6 +603,7 @@ class DataParallelPPOActor(BasePPOActor):
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         self._optimizer_steps_this_update = 0
+        self._explicit_replica_sync = getattr(self, "_explicit_replica_sync", False)
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -637,7 +654,14 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             dataloader = [batch[batch["dedup_mini"] == mini] for mini in batch["dedup_mini"].unique(sorted=True)] if dedup else batch.split(self.config.ppo_mini_batch_size)
 
+        if self._explicit_replica_sync:
+            count = torch.tensor([len(dataloader)], dtype=torch.int64, device=get_torch_device().current_device())
+            counts = [torch.empty_like(count) for _ in range(torch.distributed.get_world_size())]
+            torch.distributed.all_gather(counts, count)
+            if len({int(value.item()) for value in counts}) != 1:
+                raise RuntimeError("Actor minibatch counts differ across replica ranks")
         metrics = {}
+        monitor_totals = torch.zeros(3, dtype=torch.float64, device=get_torch_device().current_device())
         micro_batch_count = 0
         if edge_distillation_requested:
             append_to_dict(metrics, {"edge/skipped_missing_inputs": float(bool(edge_missing_keys))})
@@ -658,184 +682,222 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
-
-                for data in micro_batches:
-                    micro_batch_count += 1
-                    # Support all hardwares
-                    if isinstance(data, DataProto):
-                        data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
-                    else:
-                        data = data.to(get_torch_device().current_device())  # actor device is cpu when using offload
-                    responses = data["responses"]
-                    response_length = responses.size(1)
-                    attention_mask = data["attention_mask"]
-                    if multi_turn:
-                        response_mask = data["loss_mask"][:, -response_length:]
-                    else:
-                        response_mask = attention_mask[:, -response_length:]
-
+                if self._explicit_replica_sync:
+                    from verl.utils.replica_sync import summed_denominators
+                    mb = mini_batch.batch if isinstance(mini_batch, DataProto) else mini_batch
+                    mask = mb["loss_mask"][:, -mb["responses"].shape[1]:] if multi_turn else mb["attention_mask"][:, -mb["responses"].shape[1]:]
                     if tree_batch:
-                        response_mask = response_mask * (~data["is_padding_copy"]).unsqueeze(-1)
-                        data["edge_distill_weight"] *= data["kd_canonical"] * (~data["is_padding_copy"])
+                        mask = mask * (~mb["is_padding_copy"]).unsqueeze(-1)
+                    row_weights = mb["w_tok"] if dedup else torch.ones(len(mask), device=mask.device)
+                    kd_weights = mb["edge_distill_weight"] if edge_distillation_enabled else torch.zeros(len(mask), device=mask.device)
+                    if tree_batch and edge_distillation_enabled:
+                        kd_weights = kd_weights * mb["kd_canonical"] * (~mb["is_padding_copy"])
                         if int(edge_cfg.get("path_tier", 2)) == 1:
-                            data["edge_distill_weight"] *= ~data["kd_path_has_T"]
-                    old_log_prob = data["old_log_probs"]
-                    advantages = data["advantages"]
+                            kd_weights = kd_weights * (~mb["kd_path_has_T"])
+                    global_denominators = summed_denominators(mask, row_weights, kd_weights)
 
-                    clip_ratio = self.config.clip_ratio
-                    clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
-                    clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
-                    clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
-                    entropy_coeff = self.config.entropy_coeff
-                    loss_agg_mode = self.config.loss_agg_mode
+                from contextlib import nullcontext
+                accumulation_context = self.actor_module.no_sync() if self._explicit_replica_sync else nullcontext()
+                with accumulation_context:
+                    for data in micro_batches:
+                        micro_batch_count += 1
+                        # Support all hardwares
+                        if isinstance(data, DataProto):
+                            data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
+                        else:
+                            data = data.to(get_torch_device().current_device())  # actor device is cpu when using offload
+                        responses = data["responses"]
+                        response_length = responses.size(1)
+                        attention_mask = data["attention_mask"]
+                        if multi_turn:
+                            response_mask = data["loss_mask"][:, -response_length:]
+                        else:
+                            response_mask = attention_mask[:, -response_length:]
 
-                    teacher_topk_logits = None
-                    teacher_topk_ids = None
-                    active_tree_kd = tree_batch and bool((data["edge_distill_weight"] > 0).any())
-                    if tree_batch and edge_distillation_enabled and not active_tree_kd:
-                        # No teacher forward is needed, but these GRPO rows belong in
-                        # the teacher-row-fraction denominator.
-                        self._edge_teacher_rows = getattr(self, "_edge_teacher_rows", 0)
-                        self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + responses.size(0)
-                    if edge_distillation_enabled and edge_token_selection == "teacher_topk" and (not tree_batch or active_tree_kd):
-                        # Same actor module under no_grad, evaluated before the student,
-                        # but only on rows the gate activated (weight > 0): every other row
-                        # is masked out of the distillation loss, so its teacher pass is waste.
-                        _, teacher_topk_logits, teacher_topk_ids = self._edge_teacher_forward_active(
-                            data, responses, temperature, top_k=edge_top_k
+                        if tree_batch:
+                            response_mask = response_mask * (~data["is_padding_copy"]).unsqueeze(-1)
+                            data["edge_distill_weight"] *= data["kd_canonical"] * (~data["is_padding_copy"])
+                            if int(edge_cfg.get("path_tier", 2)) == 1:
+                                data["edge_distill_weight"] *= ~data["kd_path_has_T"]
+                        old_log_prob = data["old_log_probs"]
+                        advantages = data["advantages"]
+
+                        clip_ratio = self.config.clip_ratio
+                        clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
+                        clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
+                        clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
+                        entropy_coeff = self.config.entropy_coeff
+                        loss_agg_mode = self.config.loss_agg_mode
+
+                        teacher_topk_logits = None
+                        teacher_topk_ids = None
+                        active_tree_kd = tree_batch and bool((data["edge_distill_weight"] > 0).any())
+                        if tree_batch and edge_distillation_enabled and not active_tree_kd:
+                            # No teacher forward is needed, but these GRPO rows belong in
+                            # the teacher-row-fraction denominator.
+                            self._edge_teacher_rows = getattr(self, "_edge_teacher_rows", 0)
+                            self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + responses.size(0)
+                        if edge_distillation_enabled and edge_token_selection == "teacher_topk" and (not tree_batch or active_tree_kd):
+                            # Same actor module under no_grad, evaluated before the student,
+                            # but only on rows the gate activated (weight > 0): every other row
+                            # is masked out of the distillation loss, so its teacher pass is waste.
+                            _, teacher_topk_logits, teacher_topk_ids = self._edge_teacher_forward_active(
+                                data, responses, temperature, top_k=edge_top_k
+                            )
+
+                        # all return: (bsz, response_length)
+                        calculate_entropy = entropy_coeff != 0 or tree_batch
+                        entropy, log_prob, student_topk_logits, _ = self._forward_micro_batch(
+                            micro_batch=data,
+                            temperature=temperature,
+                            calculate_entropy=calculate_entropy,
+                            token_selection_top_k=edge_top_k if teacher_topk_ids is not None else None,
+                            token_selection_ids=teacher_topk_ids,
                         )
 
-                    # all return: (bsz, response_length)
-                    calculate_entropy = False
-                    if entropy_coeff != 0:
-                        calculate_entropy = True
-                    entropy, log_prob, student_topk_logits, _ = self._forward_micro_batch(
-                        micro_batch=data,
-                        temperature=temperature,
-                        calculate_entropy=calculate_entropy,
-                        token_selection_top_k=edge_top_k if teacher_topk_ids is not None else None,
-                        token_selection_ids=teacher_topk_ids,
-                    )
-                    
-                    if tree_batch and active_tree_kd:
-                        tree_student_logits = student_topk_logits
-                        tree_student_mass = self._last_selected_mass
-                        tree_gap = torch.zeros_like(log_prob)
-                        extra = ((data["edge_distill_weight"] > 0) & data["kd_path_has_T"]).nonzero(as_tuple=True)[0]
-                        if extra.numel():
-                            noexp = {
-                                "input_ids": data["kd_student_input_ids"].index_select(0,extra),
-                                "attention_mask": data["kd_student_attention_mask"].index_select(0,extra),
-                                "position_ids": data["kd_student_position_ids"].index_select(0,extra),
-                                "responses": responses.index_select(0,extra),
-                            }
-                            _, noexp_lp, noexp_logits, _ = self._forward_micro_batch(noexp, temperature,
-                                token_selection_top_k=edge_top_k, token_selection_ids=teacher_topk_ids.index_select(0,extra))
-                            tree_student_logits = student_topk_logits.index_copy(0,extra,noexp_logits)
-                            tree_student_mass = tree_student_mass.index_copy(0,extra,self._last_selected_mass)
-                            tree_gap = tree_gap.index_copy(0,extra,log_prob.index_select(0,extra)-noexp_lp)
+                        if tree_batch and active_tree_kd:
+                            tree_student_logits = student_topk_logits
+                            tree_student_mass = self._last_selected_mass
+                            tree_gap = torch.zeros_like(log_prob)
+                            extra = ((data["edge_distill_weight"] > 0) & data["kd_path_has_T"]).nonzero(as_tuple=True)[0]
+                            if extra.numel():
+                                noexp = {
+                                    "input_ids": data["kd_student_input_ids"].index_select(0,extra),
+                                    "attention_mask": data["kd_student_attention_mask"].index_select(0,extra),
+                                    "position_ids": data["kd_student_position_ids"].index_select(0,extra),
+                                    "responses": responses.index_select(0,extra),
+                                }
+                                _, noexp_lp, noexp_logits, _ = self._forward_micro_batch(noexp, temperature,
+                                    token_selection_top_k=edge_top_k, token_selection_ids=teacher_topk_ids.index_select(0,extra))
+                                tree_student_logits = student_topk_logits.index_copy(0,extra,noexp_logits)
+                                tree_student_mass = tree_student_mass.index_copy(0,extra,self._last_selected_mass)
+                                tree_gap = tree_gap.index_copy(0,extra,log_prob.index_select(0,extra)-noexp_lp)
 
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-                    if loss_mode == "vanilla":
-                        policy_loss_fn = compute_policy_loss
-                    elif loss_mode == "gspo":
-                        policy_loss_fn = compute_policy_loss_gspo
-                    else:
-                        raise ValueError(f"Unsupported loss_mode: {loss_mode}")
-
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        cliprange=clip_ratio,
-                        cliprange_low=clip_ratio_low,
-                        cliprange_high=clip_ratio_high,
-                        clip_ratio_c=clip_ratio_c,
-                        loss_agg_mode=loss_agg_mode,
-                    )
-
-                    if dedup:
-                        from agent_system.tree.dedup import weighted_node_policy_loss
-                        pg_loss = weighted_node_policy_loss(old_log_prob,log_prob,data["A_pos"],data["A_neg"],response_mask,data["w_tok"],clip_ratio_low,clip_ratio_high,clip_ratio_c)
-
-                    if entropy_coeff != 0:
-                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
-                    else:
-                        policy_loss = pg_loss
-
-                    if self.config.use_kl_loss:
-                        ref_log_prob = data["ref_log_prob"]
-                        # compute kl loss
-                        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        metrics["actor/kl_coef"] = self.config.kl_loss_coef
-
-                    if edge_distillation_enabled:
-                        if tree_batch:
-                            if active_tree_kd:
-                                from agent_system.tree.loss import tree_topk_loss, tree_kd_metrics
-                                edge_loss, tree_kl, tree_gradient = tree_topk_loss(tree_student_logits,
-                                    teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask)
-                                edge_metrics = tree_kd_metrics(tree_kl, tree_student_mass, data["edge_distill_weight"],
-                                    response_mask, data["kd_path_has_T"], tree_gap, tree_gradient,
-                                    teacher_topk_ids, responses, advantages)
-                                edge_metrics.update({"kd/weighted_loss_all_tokens":float(edge_loss.detach()),
-                                    "kd/active_token_rate":float((response_mask*(data["edge_distill_weight"]>0).unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
-                                    "kd/effective_weight_sum_over_N":float((response_mask*data["edge_distill_weight"].unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
-                                    "kd/to_pg_abs_ratio":float(edge_cfg.get("coef", 1.0)*edge_loss.detach().abs()/(pg_loss.detach().abs()+1e-6))})
-                            else:
-                                edge_loss = log_prob.sum()*0
-                                edge_metrics = {"kd/weighted_loss_all_tokens":0., "kd/active_token_rate":0.}
-                        elif edge_token_selection == "teacher_topk":
-                            edge_loss, edge_metrics = compute_edge_teacher_topk_distillation_loss(
-                                student_topk_logits=student_topk_logits,
-                                teacher_topk_logits=teacher_topk_logits,
-                                response_mask=response_mask,
-                                edge_distill_weight=data["edge_distill_weight"],
-                                loss_agg_mode=loss_agg_mode,
-                            )
+                        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                        if loss_mode == "vanilla":
+                            policy_loss_fn = compute_policy_loss
+                        elif loss_mode == "gspo":
+                            policy_loss_fn = compute_policy_loss_gspo
                         else:
-                            teacher_log_prob, _, _ = self._edge_teacher_forward_active(
-                                data, responses, temperature, top_k=None
-                            )
-                            edge_loss, edge_metrics = compute_edge_distillation_loss(
-                                student_log_prob=log_prob,
-                                teacher_log_prob=teacher_log_prob,
-                                response_mask=response_mask,
-                                edge_distill_weight=data["edge_distill_weight"],
-                                loss_agg_mode=loss_agg_mode,
-                            )
-                        policy_loss = policy_loss + edge_cfg.get("coef", 1.0) * edge_loss
-                        metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
-                        append_to_dict(metrics, edge_metrics)
+                            raise ValueError(f"Unsupported loss_mode: {loss_mode}")
 
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * (data["w_tok"].sum() / data["dedup_mini_weight"][0] if dedup else len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = policy_loss / self.gradient_accumulation
-                    loss.backward()
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            cliprange=clip_ratio,
+                            cliprange_low=clip_ratio_low,
+                            cliprange_high=clip_ratio_high,
+                            clip_ratio_c=clip_ratio_c,
+                            loss_agg_mode=loss_agg_mode,
+                        )
 
-                    data = {
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                    }
-                    append_to_dict(metrics, data)
+                        if dedup:
+                            from agent_system.tree.dedup import weighted_node_policy_loss
+                            pg_loss = weighted_node_policy_loss(old_log_prob,log_prob,data["A_pos"],data["A_neg"],response_mask,data["w_tok"],clip_ratio_low,clip_ratio_high,clip_ratio_c)
+
+                        if entropy_coeff != 0:
+                            entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+                            # compute policy loss
+                            policy_loss = pg_loss - entropy_loss * entropy_coeff
+                        else:
+                            policy_loss = pg_loss
+
+                        if self.config.use_kl_loss:
+                            ref_log_prob = data["ref_log_prob"]
+                            # compute kl loss
+                            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
+                            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+
+                            policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                            metrics["actor/kl_loss"] = kl_loss.detach().item()
+                            metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                        if edge_distillation_enabled:
+                            if tree_batch:
+                                if active_tree_kd:
+                                    from agent_system.tree.loss import tree_topk_loss, tree_kd_metrics
+                                    edge_loss, tree_kl, tree_gradient = tree_topk_loss(tree_student_logits,
+                                        teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask)
+                                    edge_metrics = tree_kd_metrics(tree_kl, tree_student_mass, data["edge_distill_weight"],
+                                        response_mask, data["kd_path_has_T"], tree_gap, tree_gradient,
+                                        teacher_topk_ids, responses, advantages)
+                                    edge_metrics.update({"kd/weighted_loss_all_tokens":float(edge_loss.detach()),
+                                        "kd/active_token_rate":float((response_mask*(data["edge_distill_weight"]>0).unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
+                                        "kd/effective_weight_sum_over_N":float((response_mask*data["edge_distill_weight"].unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
+                                        "kd/to_pg_loss_abs_ratio":float(edge_cfg.get("coef", 1.0)*edge_loss.detach().abs()/(pg_loss.detach().abs()+1e-6))})
+                                else:
+                                    edge_loss = log_prob.sum()*0
+                                    edge_metrics = {"kd/weighted_loss_all_tokens":0., "kd/active_token_rate":0.}
+                            elif edge_token_selection == "teacher_topk":
+                                edge_loss, edge_metrics = compute_edge_teacher_topk_distillation_loss(
+                                    student_topk_logits=student_topk_logits,
+                                    teacher_topk_logits=teacher_topk_logits,
+                                    response_mask=response_mask,
+                                    edge_distill_weight=data["edge_distill_weight"],
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                            else:
+                                teacher_log_prob, _, _ = self._edge_teacher_forward_active(
+                                    data, responses, temperature, top_k=None
+                                )
+                                edge_loss, edge_metrics = compute_edge_distillation_loss(
+                                    student_log_prob=log_prob,
+                                    teacher_log_prob=teacher_log_prob,
+                                    response_mask=response_mask,
+                                    edge_distill_weight=data["edge_distill_weight"],
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                            policy_loss = policy_loss + edge_cfg.get("coef", 1.0) * edge_loss
+                            metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
+                            append_to_dict(metrics, edge_metrics)
+
+                        expanded_mask = response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask
+                        expanded_tokens = expanded_mask.sum()
+                        monitor_totals[0] += (entropy.detach() * expanded_mask).sum().double() if entropy is not None else 0
+                        monitor_totals[1] += pg_loss.detach().double() * expanded_tokens
+                        monitor_totals[2] += expanded_tokens
+                        if self._explicit_replica_sync:
+                            # Accumulate local numerators with one shared global denominator.
+                            # The gradient collective below averages ranks, hence world_size.
+                            scale = torch.distributed.get_world_size() * expanded_tokens / global_denominators[0]
+                            loss = policy_loss * scale
+                            if edge_distillation_enabled and not tree_batch:
+                                active_tokens = (response_mask * (data["edge_distill_weight"] > 0).unsqueeze(-1)).sum()
+                                kd_scale = torch.distributed.get_world_size() * active_tokens / global_denominators[1]
+                                loss = (policy_loss - edge_cfg.get("coef", 1.0) * edge_loss) * scale + edge_cfg.get("coef", 1.0) * edge_loss * kd_scale
+                        elif self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = policy_loss * (data["w_tok"].sum() / data["dedup_mini_weight"][0] if dedup else len(data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = policy_loss / self.gradient_accumulation
+                        loss.backward()
+
+                        data = {
+                            "actor/pg_loss": pg_loss.detach().item(),
+                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),
+                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                        }
+                        append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
                 print(f"T066_MINI index={batch_idx} pg_loss={metrics.get('actor/pg_loss', [])} grad_norm={float(grad_norm)}", flush=True)
         self.actor_optimizer.zero_grad()
+        if torch.distributed.is_initialized():
+            torch.distributed.all_reduce(monitor_totals, op=torch.distributed.ReduceOp.SUM)
+        metrics["actor/pg_loss_expanded"] = float(monitor_totals[1] / monitor_totals[2].clamp_min(1))
+        if tree_batch or entropy_coeff != 0:
+            metrics["actor/entropy_expanded"] = float(monitor_totals[0] / monitor_totals[2].clamp_min(1))
+        self._policy_updates_seen = getattr(self, "_policy_updates_seen", 0) + 1
+        if self._explicit_replica_sync and self._policy_updates_seen <= 2:
+            from verl.utils.replica_sync import verify_replica_parameters
+            digest = verify_replica_parameters(self.actor_module)
+            print(f"T069_RANK_HASH update={self._policy_updates_seen} rank={torch.distributed.get_rank()} sha256={digest}", flush=True)
         if getattr(self, "_edge_teacher_rows_total", 0):
             metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
             metrics["perf/edge_teacher_rows"] = self._edge_teacher_rows

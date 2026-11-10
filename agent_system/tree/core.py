@@ -381,6 +381,8 @@ def _turn_records(tree, leaf, lookup):
             depth=node.depth,
             task_experiences=[_experience_line(lookup[e]) for e in task_ids if e in lookup],
             step_experiences=[_experience_line(lookup[e]) for e in step_ids if e in lookup],
+            task_experience_ids=task_ids,
+            step_experience_ids=step_ids,
             experience_ids=task_ids + step_ids,
             action=node.action,
             observation=node.observation,

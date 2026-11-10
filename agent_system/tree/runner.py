@@ -152,6 +152,34 @@ def tree_progress_metrics(tree):
         )
 
     audits = tree.audits
+    step_audits = [a for a in audits if tree.forks[a["fork_id"]].depth > 1]
+    answer_ready = []
+    import re
+    for audit in step_audits:
+        fork = tree.forks[audit["fork_id"]]
+        state = tree.nodes[fork.left_node_id].state_before
+        gold = state.ground_truth
+        if isinstance(gold, dict):
+            gold = gold.get("target", [])
+        if isinstance(gold, str):
+            gold = [gold]
+        if gold is None:
+            gold = []
+        observation = state.last_observation.casefold()
+        contains_gold = any(
+            str(answer).strip() and re.search(r"(?<!\w)" + re.escape(str(answer).strip().casefold()) + r"(?!\w)", observation)
+            for answer in gold
+        )
+        if contains_gold:
+            answer_ready.append(audit)
+    out["answer_ready/fork_count"] = float(len(answer_ready))
+    out["answer_ready/fraction"] = len(answer_ready) / max(1, len(step_audits))
+    if answer_ready:
+        out["answer_ready/delta_mean"] = statistics.mean(a["delta"] for a in answer_ready)
+        out["answer_ready/right_search_rate"] = statistics.mean(
+            tree.nodes[tree.forks[a["fork_id"]].right_node_id].action.lstrip().startswith("<search>")
+            for a in answer_ready
+        )
     ab(audits, "exp_ab/all/")
     ab([a for a in audits if tree.forks[a["fork_id"]].depth == 1], "exp_ab/task_T/")
     ab([a for a in audits if tree.forks[a["fork_id"]].depth > 1], "exp_ab/step_S/")
@@ -370,7 +398,11 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     tree.metrics.update(tree_progress_metrics(tree))
     if config.env.tree_experience.get("dedup_shared_prefix", False):
         from agent_system.tree.question_batches import prepare_dedup_batch
-        batch = prepare_dedup_batch(batch, tree, actor.world_size)
+        batch = prepare_dedup_batch(
+            batch, tree, actor.world_size,
+            batching=config.env.tree_experience.get("dedup_batching", "question_grouped"),
+            seed=int(config.env.get("seed", 0)) + step,
+        )
     collector.last_tree = tree
     root = Path(config.trainer.default_local_dir).parent / "tree-private"
     root.mkdir(parents=True, exist_ok=True)
