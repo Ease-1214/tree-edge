@@ -2046,6 +2046,8 @@ class RayPPOTrainer:
 
     def _balance_batch(self, batch: DataProto, metrics, logging_prefix="global_seqlen"):
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""
+        if batch.meta_info.get("dedup_shared_prefix", False):
+            return
         attention_mask = batch.batch["attention_mask"]
         batch_size = attention_mask.shape[0]
         global_seqlen_lst = batch.batch["attention_mask"].view(batch_size, -1).sum(-1).tolist()  # (train_batch_size,)
@@ -2171,7 +2173,7 @@ class RayPPOTrainer:
 
                     tree_mode = bool(batch.meta_info.get("tree_mode", False))
                     tree_configured = bool(self.config.env.get("tree_experience", {}).get("enable", False))
-                    if tree_mode:
+                    if tree_mode and not os.environ.get("T066_REPLAY_TREE"):
                         from agent_system.tree.training import manage_tree_experiences
                         with _timer("experience_management", timing_raw):
                             metrics.update(manage_tree_experiences(self, self.traj_collector.last_tree))
@@ -2352,6 +2354,15 @@ class RayPPOTrainer:
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
+
+                    if os.environ.get("T066_REPLAY_TREE"):
+                        output = os.environ["T066_REPLAY_OUTPUT"]
+                        self.actor_rollout_wg.save_checkpoint(output, global_step=self.global_steps)
+                        from pathlib import Path as ReplayPath
+                        import json as replay_json
+                        ReplayPath(output, "replay_metrics.json").write_text(replay_json.dumps(dict(metrics=metrics,timing=timing_raw),default=lambda value:float(value),indent=2))
+                        logger.finish()
+                        return
 
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)

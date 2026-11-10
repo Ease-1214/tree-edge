@@ -12,7 +12,7 @@ def test_adapter_only_resume_identity_and_scheduler(tmp_path,monkeypatch):
     save_file({"base_model.layer.lora_A.weight":expected},str(destination/"adapter_model.safetensors"))
     parameter=torch.nn.Parameter(torch.zeros(2,2))
     model=SimpleNamespace(named_parameters=lambda:[("_fsdp_wrapped_module.base_model.layer.lora_A.default.weight",parameter)])
-    manager=object.__new__(module.FSDPCheckpointManager);manager.model=model;manager.world_size=1;manager.rank=0
+    manager=object.__new__(module.FSDPCheckpointManager);manager.model=model;manager.world_size=1;manager.rank=0;manager.optimizer=None
     steps=[];manager.lr_scheduler=SimpleNamespace(step=lambda value:steps.append(value))
     monkeypatch.setattr(module.FSDP,"summon_full_params",lambda *args,**kwargs:nullcontext())
     monkeypatch.setattr(torch.distributed,"barrier",lambda:None)

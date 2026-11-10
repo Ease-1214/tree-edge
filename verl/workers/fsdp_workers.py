@@ -697,6 +697,7 @@ class ActorRolloutRefWorker(Worker):
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr
+            metrics["ckpt/optimizer_restored"] = float(getattr(self.checkpoint_manager, "optimizer_restored", True))
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
@@ -848,6 +849,9 @@ class ActorRolloutRefWorker(Worker):
             if not self._is_lora or not isinstance(self.actor_module, PeftModel):
                 raise ValueError("Adapter-only checkpoints require an active PEFT LoRA actor")
             os.makedirs(local_path, exist_ok=True)
+            if not os.environ.get("T066_REPLAY_TREE"):
+                from verl.utils.checkpoint.adapter_state import save_adapter_training_state
+                save_adapter_training_state(os.path.join(local_path,f"training_state_rank_{self.rank}.pt"),self.actor_optimizer,self.actor_lr_scheduler)
         else:
             self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep, track_for_retention=track_for_retention)
         dist.barrier()

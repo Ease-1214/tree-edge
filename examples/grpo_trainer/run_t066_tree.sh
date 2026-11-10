@@ -9,8 +9,8 @@ export EDGE_EMBED_URL=http://127.0.0.1:29700 EDGE_EMBED_CLIENT=t066-tree
 export EDGE_REFLECTOR_PROMPT=search EDGE_TOKEN_SELECTION=teacher_topk EDGE_TOP_K=20
 export ENABLE_EXPERIENCE_EVOLUTION=true EXP_ROLLOUT_WARMUP_STEPS=null
 export T063_REFLECTOR_AUDIT=1
-export WANDB_MODE=online T062_HTTP_PROXY=http://127.0.0.1:29662
-export WANDB_RUN_ID=t066-tree-tier2-s0 WANDB_RESUME=must WANDB_RUN_GROUP=t066
+export WANDB_MODE=${WANDB_MODE:-online} T062_HTTP_PROXY=http://127.0.0.1:29662
+export WANDB_RUN_ID=${WANDB_RUN_ID:-t066-tree-tier2-s0} WANDB_RESUME=must WANDB_RUN_GROUP=t066
 export WANDB_NAME=t066-tree-tier2-s0 WANDB_TAGS=tree,tier2,beta0.3,full200
 exec bash examples/grpo_trainer/run_t062_perf.sh \
  env.rollout.n=1 env.tree_experience.enable=True \
