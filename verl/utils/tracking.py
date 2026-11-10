@@ -53,6 +53,11 @@ class Tracking:
 
             wandb.init(project=project_name, name=experiment_name, config=config)
             self.logger["wandb"] = wandb
+            import os
+            self._t069_eval_root = os.environ.get("T069_RUN_DIR")
+            if self._t069_eval_root:
+                from verl.utils.eval_logging import define_evaluation_axes
+                define_evaluation_axes(wandb)
 
         if "mlflow" in default_backend:
             import os
@@ -125,10 +130,19 @@ class Tracking:
             self.logger["clearml"] = ClearMLLogger(project_name, experiment_name, config)
 
     def log(self, data, step, backend=None):
+        evaluation_names = []
+        root = getattr(self, "_t069_eval_root", None)
+        if root and (backend is None or "wandb" in backend):
+            from verl.utils.eval_logging import pending_evaluations
+            evaluation_metrics, evaluation_names = pending_evaluations(root)
+            data = dict(data, **evaluation_metrics)
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
                 if default_backend == "wandb":
                     logger_instance.log(data=data, step=step, commit=True)
+                    if evaluation_names:
+                        from verl.utils.eval_logging import acknowledge_evaluations
+                        acknowledge_evaluations(root, evaluation_names)
                 else:
                     logger_instance.log(data=data, step=step)
 
@@ -138,6 +152,10 @@ class Tracking:
             return
         self._finished = True
         self.__del__()
+        root = getattr(self, "_t069_eval_root", None)
+        if root:
+            import json
+            Path(root, "training-finished.json").write_text(json.dumps({"finished": True}))
 
     def __del__(self):
         if getattr(self, "_finished_del", False):
