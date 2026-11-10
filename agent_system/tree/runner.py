@@ -355,12 +355,12 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
         "tree/search_calls_per_question": search_calls / max(1, len(questions)),
         "gate/fork_count": len(tree.forks),
         "gate/trigger_count": sum(x["gate"] for x in tree.audits),
-        "gate/same_action_skip_rate": (
+        "gate/same_action_rate": (
             statistics.mean(x["same_action"] for x in tree.audits)
             if tree.audits
             else 0.0
         ),
-        "gate/utility_skip_rate": (
+        "gate/negative_utility_rate": (
             statistics.mean(x["utility_mean"] < 0 for x in tree.audits)
             if tree.audits
             else 0.0

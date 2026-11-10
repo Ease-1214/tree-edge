@@ -109,10 +109,8 @@ class TreeRollout:
             informative = len(set(l_rewards + r_rewards)) > 1
             gate = (
                 bool(fork.new_experience_ids)
-                and not same
                 and max(l_rewards) == 0
                 and max(r_rewards) == 1
-                and utility >= 0
             )
             self.audits.append(
                 dict(

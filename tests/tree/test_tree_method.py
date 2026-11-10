@@ -61,14 +61,16 @@ def test_independent_state():
     [
         ((0, 0), (0, 1), 0, False, True),
         ((1, 0), (1, 1), 0, False, False),
-        ((0, 0), (1, 1), -1, False, False),
-        ((0,), (1,), 0, True, False),
+        ((0, 0), (1, 1), -1, False, True),
+        ((0,), (1,), -0.001, False, True),
+        ((0,), (1,), 0, True, True),
         ((0,), (0,), 0, False, False),
     ],
 )
 def test_gate(left, right, u, same, expected):
     t = example(left, right, u, same)
     assert t.audits[0]["gate"] == expected
+    assert t.audits[0]["utility_mean"] == u
     if same:
         assert not t.question_credits()
 
