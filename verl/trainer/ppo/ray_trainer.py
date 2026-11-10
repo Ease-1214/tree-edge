@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+from pathlib import Path
 import uuid
 from collections import defaultdict
 from contextlib import contextmanager
@@ -1271,6 +1272,7 @@ class RayPPOTrainer:
     def _update_experiences_from_training_rollouts(self, batch: DataProto):
         """Update the V2 experience bank from exact same-anchor contrasts."""
         update_config = self.config.env.experience_memory
+        reflector_metrics = {"reflector/failed": 0.0, "reflector/submitted": 0.0, "reflector/skip_reason": 3.0}
 
         update_frequency = int(update_config.get('update_frequency', 1))
         if update_frequency > 1 and self.global_steps % update_frequency != 0:
@@ -1278,12 +1280,12 @@ class RayPPOTrainer:
                 f"[ExperienceUpdate] Skip at step {self.global_steps}; "
                 f"update_frequency={update_frequency}"
             )
-            return
+            return reflector_metrics
 
         retrieval_memory = self._get_experience_bank()
         if retrieval_memory is None:
             print("[ExperienceUpdate] No retrieval_memory found in envs")
-            return
+            return reflector_metrics
 
         gain_metrics, contrast_examples = self._update_experience_gain_from_batch(
             batch=batch,
@@ -1297,11 +1299,11 @@ class RayPPOTrainer:
         else:
             print("[ExperienceUpdate] No success-rate metadata found")
 
-        self._update_experiences_from_contrasts(
+        reflector_metrics.update(self._update_experiences_from_contrasts(
             contrast_examples=contrast_examples,
             success_rate=success_rate,
             retrieval_memory=retrieval_memory,
-        )
+        ) or {})
 
         save_dir = self.config.trainer.get('default_local_dir', './outputs')
         save_path = os.path.join(save_dir, f'updated_experiences_step{self.global_steps}.json')
@@ -1312,6 +1314,8 @@ class RayPPOTrainer:
             retrieval_memory.save_experiences(canonical_path)
             print(f"[ExperienceUpdate] Saved canonical experience bank to {canonical_path}")
         self._sync_experiences_to_retrieval_server(retrieval_memory, path=save_path)
+
+        return reflector_metrics
 
     def _get_experience_bank(self):
         if hasattr(self, 'envs') and hasattr(self.envs, 'retrieval_memory'):
@@ -1585,7 +1589,7 @@ class RayPPOTrainer:
 
     def _run_dynamic_experience_management(self, batch: DataProto) -> dict:
         """Run the training-period experience lifecycle at a fixed interval."""
-        metrics = {"experience_management/enabled": 1.0}
+        metrics = {"experience_management/enabled": 1.0, "reflector/failed": 0.0, "reflector/submitted": 0.0, "reflector/skip_reason": 3.0}
         update_config = self.config.env.get("experience_memory", {}) or {}
         management = self._dynamic_management_config()
         interval = self._dynamic_management_interval()
@@ -1654,11 +1658,11 @@ class RayPPOTrainer:
         # legacy +/-1 updater, avoiding a second update of the same utility.
         if credits and self._is_experience_evolution_enabled():
             success_rate = self._collect_training_success_rates(batch)
-            self._update_experiences_from_contrasts(
+            metrics.update(self._update_experiences_from_contrasts(
                 contrast_examples=contrasts,
                 success_rate=success_rate,
                 retrieval_memory=retrieval_memory,
-            )
+            ) or {})
             metrics["experience_management/evolution_contrasts"] = float(len(contrasts))
 
         evictions = {"removed": [], "warnings": []}
@@ -1784,6 +1788,7 @@ class RayPPOTrainer:
         retrieval_memory,
     ):
         update_config = self.config.env.experience_memory
+        metrics = {"reflector/failed": 0.0, "reflector/submitted": 0.0, "reflector/skip_reason": 1.0}
         threshold = update_config.get('update_threshold', 0.5)
 
         needs_update = bool(contrast_examples)
@@ -1792,7 +1797,8 @@ class RayPPOTrainer:
 
         if not needs_update:
             print("[ExperienceUpdate] No useful same-anchor contrast selected for LLM update")
-            return
+            metrics["reflector/skip_reason"] = 2.0 if contrast_examples else 1.0
+            return metrics
 
         max_examples = int(update_config.get('max_failed_trajectories', 10))
         contrast_examples = contrast_examples[:max_examples]
@@ -1817,6 +1823,16 @@ class RayPPOTrainer:
             current_experiences=retrieval_memory.experiences,
         )
 
+        metrics.update({
+            "reflector/failed": float(not self.experience_updater.last_update_succeeded),
+            "reflector/submitted": float(len(contrast_examples)),
+            "reflector/skip_reason": 0.0,
+        })
+        status = dict(step=int(self.global_steps), metrics=metrics,
+            failure_reason=getattr(self.experience_updater, "last_failure_reason", None))
+        status_path = Path(self.config.trainer.default_local_dir) / f"reflector_status_step{self.global_steps}.json"
+        status_path.parent.mkdir(parents=True, exist_ok=True)
+        status_path.write_text(json.dumps(status))
         if new_experiences:
             for exp in new_experiences:
                 # Overwrite (not setdefault): the LLM returns last_updated_step=null, which
@@ -1835,6 +1851,8 @@ class RayPPOTrainer:
             print(f"[ExperienceUpdate] Upserted {added} generated experiences")
         else:
             print("[ExperienceUpdate] No new experiences generated")
+
+        return metrics
 
     def _collect_training_success_rates(self, batch: DataProto) -> dict:
         """Collect per-step training success rates from rollout metadata."""
@@ -2233,7 +2251,7 @@ class RayPPOTrainer:
                             metrics.update(self._run_dynamic_experience_management(batch))
                     elif self._is_experience_evolution_enabled():
                         with _timer("experience_evolution", timing_raw):
-                            self._update_experiences_from_training_rollouts(batch)
+                            metrics.update(self._update_experiences_from_training_rollouts(batch) or {})
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
                         step_rewards_tensor = core_gigpo.compute_step_discounted_returns(
@@ -2378,6 +2396,8 @@ class RayPPOTrainer:
                         # update actor
                         with _timer("update_actor", timing_raw):
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
+                            batch.meta_info["global_step"] = int(self.global_steps)
+                            batch.meta_info["gradient_diagnostic_dir"] = str(Path(self.config.trainer.default_local_dir).parent / "diagnostics")
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)

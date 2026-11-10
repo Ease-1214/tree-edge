@@ -450,8 +450,22 @@ class DataParallelPPOActor(BasePPOActor):
 
             return entropy, log_probs, selected_logits, selected_token_ids
 
-    def _optimizer_step(self):
+    def _optimizer_step(self, diagnostic_component=None):
         assert self.config.grad_clip is not None
+        if diagnostic_component is not None:
+            from verl.utils.replica_sync import average_replica_gradients
+            average_replica_gradients(self.actor_module)
+            gradients = [
+                p.grad.detach().reshape(-1).float() if p.grad is not None
+                else torch.zeros(p.numel(), device=p.device, dtype=torch.float32)
+                for p in self.actor_module.parameters() if p.requires_grad
+            ]
+            vector = torch.cat(gradients)
+            norm = torch.linalg.vector_norm(vector)
+            if not torch.isfinite(norm):
+                raise FloatingPointError("Non-finite diagnostic gradient")
+            self._last_diagnostic_gradient = vector.cpu()
+            return norm
 
         if getattr(self, "_explicit_replica_sync", False):
             from verl.utils.replica_sync import average_replica_gradients
@@ -600,6 +614,13 @@ class DataParallelPPOActor(BasePPOActor):
     def update_policy(self, data: DataProto):
         self._optimizer_steps_this_update = 0
         self._explicit_replica_sync = getattr(self, "_explicit_replica_sync", False)
+        diagnostic_component = data.meta_info.get("gradient_diagnostic_component")
+        if (self._explicit_replica_sync and diagnostic_component is None
+                and int(data.meta_info.get("global_step", -1)) in (1, 50, 100)
+                and data.meta_info.get("gradient_diagnostic_dir")
+                and self.config.get("edge_distillation", {}).get("enable", False)):
+            from verl.utils.gradient_diagnostics import measure_actor_gradients
+            measure_actor_gradients(self, data)
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -780,6 +801,11 @@ class DataParallelPPOActor(BasePPOActor):
                             metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
                             append_to_dict(metrics, edge_metrics)
 
+                        if diagnostic_component == "pg":
+                            policy_loss = pg_loss
+                            edge_loss = log_prob.sum() * 0
+                        elif diagnostic_component == "kd":
+                            policy_loss = edge_cfg.get("coef", 1.0) * edge_loss
                         if self._explicit_replica_sync:
                             tokens = response_mask.sum()
                             scale = torch.distributed.get_world_size() * tokens / global_denominators[0]
@@ -803,12 +829,12 @@ class DataParallelPPOActor(BasePPOActor):
                         }
                         append_to_dict(metrics, data)
 
-                grad_norm = self._optimizer_step()
+                grad_norm = self._optimizer_step(diagnostic_component) if diagnostic_component else self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
-        self._policy_updates_seen = getattr(self, "_policy_updates_seen", 0) + 1
-        if self._explicit_replica_sync and self._policy_updates_seen <= 2:
+        self._policy_updates_seen = getattr(self, "_policy_updates_seen", 0) + int(diagnostic_component is None)
+        if self._explicit_replica_sync and diagnostic_component is None and self._policy_updates_seen <= 2:
             from verl.utils.replica_sync import verify_replica_parameters
             digest = verify_replica_parameters(self.actor_module)
             print(f"T069_RANK_HASH update={self._policy_updates_seen} rank={torch.distributed.get_rank()} sha256={digest}", flush=True)
