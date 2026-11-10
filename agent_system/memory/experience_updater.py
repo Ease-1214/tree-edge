@@ -9,6 +9,8 @@ import json
 import os
 import re
 import time
+import threading
+import queue
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
@@ -35,7 +37,7 @@ class ExperienceUpdater:
                 "EXPERIENCE_UPDATE_BASE_URL, and EXPERIENCE_UPDATE_MODEL environment variables."
             )
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=285.0)
         self._audit_request_count = 0
         if os.environ.get("T063_REFLECTOR_AUDIT") == "1":
             self.client._client.event_hooks.setdefault("request", []).append(self._audit_request)
@@ -47,6 +49,31 @@ class ExperienceUpdater:
 
     def _audit_request(self, request):
         self._audit_request_count += 1
+
+    def _completion_with_deadline(self, request_kwargs, total_seconds=300.0):
+        if getattr(self, "_request_thread", None) is not None and self._request_thread.is_alive():
+            raise TimeoutError("Previous reflector request is still ending")
+        results = queue.Queue(maxsize=1)
+        deadline = time.time() + total_seconds
+
+        def request():
+            try:
+                client = self.client.with_options(
+                    max_retries=0, timeout=max(0.1, total_seconds - 10),
+                    default_headers={"X-Echo-Deadline": str(deadline)})
+                results.put((True, client.chat.completions.create(**request_kwargs)))
+            except Exception as error:
+                results.put((False, error))
+
+        self._request_thread = threading.Thread(target=request, daemon=True)
+        self._request_thread.start()
+        try:
+            ok, result = results.get(timeout=total_seconds)
+        except queue.Empty:
+            raise TimeoutError("Reflector exceeded its total request deadline") from None
+        if not ok:
+            raise result
+        return result
 
     def analyze_failures(
         self,
@@ -74,7 +101,7 @@ class ExperienceUpdater:
                 "messages": [{"role": "user", "content": prompt}],
                 self.token_limit_param: self.max_completion_tokens,
             }
-            response = self.client.chat.completions.create(**request_kwargs)
+            response = self._completion_with_deadline(request_kwargs)
             request_succeeded = True
             raw_experiences = self._parse_experiences_response(response.choices[0].message.content)
             parsed_count = len(raw_experiences)
@@ -90,6 +117,7 @@ class ExperienceUpdater:
             )
             return reassigned[: self.max_new_experiences_per_update]
         except Exception as e:
+            self.last_failure_reason = type(e).__name__
             safe_error = str(e).replace(self.client.api_key, "[REDACTED]")
             print(f"[ExperienceUpdater] Error calling {self.model}: {safe_error}")
             return []

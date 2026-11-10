@@ -127,7 +127,10 @@ class Tracking:
     def log(self, data, step, backend=None):
         for default_backend, logger_instance in self.logger.items():
             if backend is None or default_backend in backend:
-                logger_instance.log(data=data, step=step)
+                if default_backend == "wandb":
+                    logger_instance.log(data=data, step=step, commit=True)
+                else:
+                    logger_instance.log(data=data, step=step)
 
     def finish(self):
         """Explicit flush/close; __del__ is not reliably reached when Ray tears down."""

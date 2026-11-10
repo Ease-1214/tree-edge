@@ -106,6 +106,16 @@ class DataParallelPPOActor(BasePPOActor):
             else verl_F.entropy_from_logits
         )
         self.device_name = get_device_name()
+        from verl.utils.replica_sync import uses_explicit_replica_sync
+        self._explicit_replica_sync = uses_explicit_replica_sync(self.actor_module)
+        if self._explicit_replica_sync:
+            if self.use_ulysses_sp or self.config.loss_agg_mode != "token-mean":
+                raise ValueError("Explicit full-replica synchronization requires token-mean loss and SP=1")
+            for parameter in self.actor_module.parameters():
+                if parameter.requires_grad:
+                    torch.distributed.broadcast(parameter.data, src=0)
+            print("T069_SYNC explicit global replica averaging enabled", flush=True)
+
 
     def _forward_response_only_rmpad(
         self,
@@ -443,7 +453,12 @@ class DataParallelPPOActor(BasePPOActor):
     def _optimizer_step(self):
         assert self.config.grad_clip is not None
 
-        if isinstance(self.actor_module, FSDP):
+        if getattr(self, "_explicit_replica_sync", False):
+            from verl.utils.replica_sync import average_replica_gradients
+            average_replica_gradients(self.actor_module)
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.actor_module.parameters(), max_norm=self.config.grad_clip)
+        elif isinstance(self.actor_module, FSDP):
             grad_norm = self.actor_module.clip_grad_norm_(max_norm=self.config.grad_clip)
         elif isinstance(self.actor_module, FSDPModule):
             grad_norm = fsdp2_clip_grad_norm_(self.actor_module.parameters(), max_norm=self.config.grad_clip)
@@ -452,6 +467,8 @@ class DataParallelPPOActor(BasePPOActor):
 
         # if grad_norm is not finite, skip the update
         if not torch.isfinite(grad_norm):
+            if getattr(self, "_explicit_replica_sync", False):
+                raise FloatingPointError("Non-finite globally synchronized actor gradient")
             print(f"WARN: rank {torch.distributed.get_rank()} grad_norm is not finite: {grad_norm}")
             self.actor_optimizer.zero_grad()
         else:
@@ -582,6 +599,7 @@ class DataParallelPPOActor(BasePPOActor):
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):
         self._optimizer_steps_this_update = 0
+        self._explicit_replica_sync = getattr(self, "_explicit_replica_sync", False)
         # make sure we are in training mode
         self.actor_module.train()
 
@@ -644,134 +662,156 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
 
                 self.actor_optimizer.zero_grad()
+                if self._explicit_replica_sync:
+                    from verl.utils.replica_sync import summed_denominators
+                    mb = mini_batch.batch if isinstance(mini_batch, DataProto) else mini_batch
+                    mask = mb["loss_mask"][:, -mb["responses"].shape[1]:] if multi_turn else mb["attention_mask"][:, -mb["responses"].shape[1]:]
+                    kd_weights = mb["edge_distill_weight"] if edge_distillation_enabled else torch.zeros(len(mask), device=mask.device)
+                    global_denominators = summed_denominators(mask, torch.ones(len(mask), device=mask.device), kd_weights)
 
-                for data in micro_batches:
-                    # Support all hardwares
-                    if isinstance(data, DataProto):
-                        data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
-                    else:
-                        data = data.to(get_torch_device().current_device())  # actor device is cpu when using offload
-                    responses = data["responses"]
-                    response_length = responses.size(1)
-                    attention_mask = data["attention_mask"]
-                    if multi_turn:
-                        response_mask = data["loss_mask"][:, -response_length:]
-                    else:
-                        response_mask = attention_mask[:, -response_length:]
+                from contextlib import nullcontext
+                accumulation_context = self.actor_module.no_sync() if self._explicit_replica_sync else nullcontext()
+                with accumulation_context:
+                    for data in micro_batches:
+                        # Support all hardwares
+                        if isinstance(data, DataProto):
+                            data = {**data.batch.to(get_torch_device().current_device()), **data.non_tensor_batch}
+                        else:
+                            data = data.to(get_torch_device().current_device())  # actor device is cpu when using offload
+                        responses = data["responses"]
+                        response_length = responses.size(1)
+                        attention_mask = data["attention_mask"]
+                        if multi_turn:
+                            response_mask = data["loss_mask"][:, -response_length:]
+                        else:
+                            response_mask = attention_mask[:, -response_length:]
 
-                    old_log_prob = data["old_log_probs"]
-                    advantages = data["advantages"]
+                        old_log_prob = data["old_log_probs"]
+                        advantages = data["advantages"]
 
-                    clip_ratio = self.config.clip_ratio
-                    clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
-                    clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
-                    clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
-                    entropy_coeff = self.config.entropy_coeff
-                    loss_agg_mode = self.config.loss_agg_mode
+                        clip_ratio = self.config.clip_ratio
+                        clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
+                        clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
+                        clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
+                        entropy_coeff = self.config.entropy_coeff
+                        loss_agg_mode = self.config.loss_agg_mode
 
-                    teacher_topk_logits = None
-                    teacher_topk_ids = None
-                    if edge_distillation_enabled and edge_token_selection == "teacher_topk":
-                        # Same actor module under no_grad, evaluated before the student,
-                        # but only on rows the gate activated (weight > 0): every other row
-                        # is masked out of the distillation loss, so its teacher pass is waste.
-                        _, teacher_topk_logits, teacher_topk_ids = self._edge_teacher_forward_active(
-                            data, responses, temperature, top_k=edge_top_k
+                        teacher_topk_logits = None
+                        teacher_topk_ids = None
+                        if edge_distillation_enabled and edge_token_selection == "teacher_topk":
+                            # Same actor module under no_grad, evaluated before the student,
+                            # but only on rows the gate activated (weight > 0): every other row
+                            # is masked out of the distillation loss, so its teacher pass is waste.
+                            _, teacher_topk_logits, teacher_topk_ids = self._edge_teacher_forward_active(
+                                data, responses, temperature, top_k=edge_top_k
+                            )
+
+                        # all return: (bsz, response_length)
+                        calculate_entropy = False
+                        if entropy_coeff != 0:
+                            calculate_entropy = True
+                        entropy, log_prob, student_topk_logits, _ = self._forward_micro_batch(
+                            micro_batch=data,
+                            temperature=temperature,
+                            calculate_entropy=calculate_entropy,
+                            token_selection_top_k=edge_top_k if teacher_topk_ids is not None else None,
+                            token_selection_ids=teacher_topk_ids,
+                        )
+                    
+                        loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
+                        if loss_mode == "vanilla":
+                            policy_loss_fn = compute_policy_loss
+                        elif loss_mode == "gspo":
+                            policy_loss_fn = compute_policy_loss_gspo
+                        else:
+                            raise ValueError(f"Unsupported loss_mode: {loss_mode}")
+
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            cliprange=clip_ratio,
+                            cliprange_low=clip_ratio_low,
+                            cliprange_high=clip_ratio_high,
+                            clip_ratio_c=clip_ratio_c,
+                            loss_agg_mode=loss_agg_mode,
                         )
 
-                    # all return: (bsz, response_length)
-                    calculate_entropy = False
-                    if entropy_coeff != 0:
-                        calculate_entropy = True
-                    entropy, log_prob, student_topk_logits, _ = self._forward_micro_batch(
-                        micro_batch=data,
-                        temperature=temperature,
-                        calculate_entropy=calculate_entropy,
-                        token_selection_top_k=edge_top_k if teacher_topk_ids is not None else None,
-                        token_selection_ids=teacher_topk_ids,
-                    )
-                    
-                    loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
-                    if loss_mode == "vanilla":
-                        policy_loss_fn = compute_policy_loss
-                    elif loss_mode == "gspo":
-                        policy_loss_fn = compute_policy_loss_gspo
-                    else:
-                        raise ValueError(f"Unsupported loss_mode: {loss_mode}")
+                        if entropy_coeff != 0:
+                            entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        cliprange=clip_ratio,
-                        cliprange_low=clip_ratio_low,
-                        cliprange_high=clip_ratio_high,
-                        clip_ratio_c=clip_ratio_c,
-                        loss_agg_mode=loss_agg_mode,
-                    )
-
-                    if entropy_coeff != 0:
-                        entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        # compute policy loss
-                        policy_loss = pg_loss - entropy_loss * entropy_coeff
-                    else:
-                        policy_loss = pg_loss
-
-                    if self.config.use_kl_loss:
-                        ref_log_prob = data["ref_log_prob"]
-                        # compute kl loss
-                        kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
-                        kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
-
-                        policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
-                        metrics["actor/kl_loss"] = kl_loss.detach().item()
-                        metrics["actor/kl_coef"] = self.config.kl_loss_coef
-
-                    if edge_distillation_enabled:
-                        if edge_token_selection == "teacher_topk":
-                            edge_loss, edge_metrics = compute_edge_teacher_topk_distillation_loss(
-                                student_topk_logits=student_topk_logits,
-                                teacher_topk_logits=teacher_topk_logits,
-                                response_mask=response_mask,
-                                edge_distill_weight=data["edge_distill_weight"],
-                                loss_agg_mode=loss_agg_mode,
-                            )
+                            # compute policy loss
+                            policy_loss = pg_loss - entropy_loss * entropy_coeff
                         else:
-                            teacher_log_prob, _, _ = self._edge_teacher_forward_active(
-                                data, responses, temperature, top_k=None
-                            )
-                            edge_loss, edge_metrics = compute_edge_distillation_loss(
-                                student_log_prob=log_prob,
-                                teacher_log_prob=teacher_log_prob,
-                                response_mask=response_mask,
-                                edge_distill_weight=data["edge_distill_weight"],
-                                loss_agg_mode=loss_agg_mode,
-                            )
-                        policy_loss = policy_loss + edge_cfg.get("coef", 1.0) * edge_loss
-                        metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
-                        append_to_dict(metrics, edge_metrics)
+                            policy_loss = pg_loss
 
-                    if self.config.use_dynamic_bsz:
-                        # relative to the dynamic bsz
-                        loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
-                    else:
-                        loss = policy_loss / self.gradient_accumulation
-                    loss.backward()
+                        if self.config.use_kl_loss:
+                            ref_log_prob = data["ref_log_prob"]
+                            # compute kl loss
+                            kld = kl_penalty(logprob=log_prob, ref_logprob=ref_log_prob, kl_penalty=self.config.kl_loss_type)
+                            kl_loss = agg_loss(loss_mat=kld, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
 
-                    data = {
-                        "actor/pg_loss": pg_loss.detach().item(),
-                        "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                        "actor/ppo_kl": ppo_kl.detach().item(),
-                        "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                    }
-                    append_to_dict(metrics, data)
+                            policy_loss = policy_loss + kl_loss * self.config.kl_loss_coef
+                            metrics["actor/kl_loss"] = kl_loss.detach().item()
+                            metrics["actor/kl_coef"] = self.config.kl_loss_coef
+
+                        if edge_distillation_enabled:
+                            if edge_token_selection == "teacher_topk":
+                                edge_loss, edge_metrics = compute_edge_teacher_topk_distillation_loss(
+                                    student_topk_logits=student_topk_logits,
+                                    teacher_topk_logits=teacher_topk_logits,
+                                    response_mask=response_mask,
+                                    edge_distill_weight=data["edge_distill_weight"],
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                            else:
+                                teacher_log_prob, _, _ = self._edge_teacher_forward_active(
+                                    data, responses, temperature, top_k=None
+                                )
+                                edge_loss, edge_metrics = compute_edge_distillation_loss(
+                                    student_log_prob=log_prob,
+                                    teacher_log_prob=teacher_log_prob,
+                                    response_mask=response_mask,
+                                    edge_distill_weight=data["edge_distill_weight"],
+                                    loss_agg_mode=loss_agg_mode,
+                                )
+                            policy_loss = policy_loss + edge_cfg.get("coef", 1.0) * edge_loss
+                            metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
+                            append_to_dict(metrics, edge_metrics)
+
+                        if self._explicit_replica_sync:
+                            tokens = response_mask.sum()
+                            scale = torch.distributed.get_world_size() * tokens / global_denominators[0]
+                            loss = policy_loss * scale
+                            if edge_distillation_enabled:
+                                active_tokens = (response_mask * (data["edge_distill_weight"] > 0).unsqueeze(-1)).sum()
+                                kd_scale = torch.distributed.get_world_size() * active_tokens / global_denominators[1]
+                                loss = (policy_loss - edge_cfg.get("coef", 1.0) * edge_loss) * scale + edge_cfg.get("coef", 1.0) * edge_loss * kd_scale
+                        elif self.config.use_dynamic_bsz:
+                            # relative to the dynamic bsz
+                            loss = policy_loss * (len(data) / self.config.ppo_mini_batch_size)
+                        else:
+                            loss = policy_loss / self.gradient_accumulation
+                        loss.backward()
+
+                        data = {
+                            "actor/pg_loss": pg_loss.detach().item(),
+                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
+                            "actor/ppo_kl": ppo_kl.detach().item(),
+                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
+                        }
+                        append_to_dict(metrics, data)
 
                 grad_norm = self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
         self.actor_optimizer.zero_grad()
+        self._policy_updates_seen = getattr(self, "_policy_updates_seen", 0) + 1
+        if self._explicit_replica_sync and self._policy_updates_seen <= 2:
+            from verl.utils.replica_sync import verify_replica_parameters
+            digest = verify_replica_parameters(self.actor_module)
+            print(f"T069_RANK_HASH update={self._policy_updates_seen} rank={torch.distributed.get_rank()} sha256={digest}", flush=True)
         if getattr(self, "_edge_teacher_rows_total", 0):
             metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
             self._edge_teacher_rows = self._edge_teacher_rows_total = 0
