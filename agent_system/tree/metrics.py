@@ -56,8 +56,8 @@ DASHBOARD = [
     ("3_kd/kl_withT", "kd/with_T/topk_kl"),
     # 4 training health
     ("4_health/grad_norm", "actor/grad_norm"),
-    ("4_health/pg_loss", "actor/pg_loss"),
-    ("4_health/entropy", "actor/entropy_loss"),
+    ("4_health/pg_loss", "actor/pg_loss_expanded"),
+    ("4_health/entropy", "actor/entropy_expanded"),
     ("4_health/response_length", "response_length/mean"),
     ("4_health/search_calls_per_q", "tree/search_calls_per_question"),
     # 5 cost

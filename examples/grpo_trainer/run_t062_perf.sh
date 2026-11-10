@@ -55,7 +55,7 @@ export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 export ENABLE_EXPERIENCE_EVOLUTION=${ENABLE_EXPERIENCE_EVOLUTION:-false} ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true
 export MODEL_PATH=/home/zehao/Tree-GRPO/model/Qwen2.5-3B-Instruct
-export TRAIN_DATA=$T061/data/train.parquet VAL_DATA=$T061/data/validation-smoke280.parquet
+export TRAIN_DATA=${T069_TRAIN_DATA:-$T061/data/train.parquet} VAL_DATA=${T069_VAL_DATA:-$T061/data/validation-smoke280.parquet}
 export EMBEDDING_MODEL=$T061/assets/Qwen3-Embedding-0.6B
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SEARCH_URL=${SEARCH_URL:-http://127.0.0.1:29661/retrieve}
