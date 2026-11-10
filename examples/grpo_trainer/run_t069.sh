@@ -2,6 +2,7 @@
 set -euo pipefail
 set +x
 MODE=${1:?tree or edge}
+shift
 case "$MODE" in tree|edge) ;; *) exit 2 ;; esac
 ROOT=/home/zehao/echo-collab/T069
 SOURCE=/home/zehao/echo-collab/T066/EDGE
