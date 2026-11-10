@@ -345,3 +345,103 @@ def select_reflector_examples(examples):
     for item in sorted(examples, key=lambda x: (-abs(x["delta"]), x["fork_id"])):
         selected.setdefault(item["question_id"], item)
     return list(selected.values())[:10]
+
+
+# --------------------------------------------------------------------------- #
+# T069: reflector material = hardest solvable questions of the current batch   #
+# --------------------------------------------------------------------------- #
+
+import random as _random
+
+
+def _bank_lookup(bank):
+    table = {}
+    for pool in ("task_experiences", "step_experiences"):
+        for item in bank.get(pool, []) or []:
+            table[str(item.get("experience_id"))] = item
+    return table
+
+
+def _experience_line(item):
+    head = item.get("title") or item.get("trigger") or item.get("when_to_apply") or ""
+    body = item.get("principle") or item.get("recommended_action") or ""
+    return (head + (": " if head and body else "") + body).strip()
+
+
+def _turn_records(tree, leaf, lookup):
+    turns = []
+    for node_id in leaf.node_ids:
+        node = tree.nodes[node_id]
+        task_ids = list((node.state_before.task_memory or {}).get("experience_ids", []) or [])
+        if node.depth == 1 and node.branch == "R":
+            task_ids = list(node.new_experience_ids)
+        step_ids = list(node.new_experience_ids) if node.depth > 1 else []
+        turns.append(dict(
+            node_id=node_id,
+            depth=node.depth,
+            task_experiences=[_experience_line(lookup[e]) for e in task_ids if e in lookup],
+            step_experiences=[_experience_line(lookup[e]) for e in step_ids if e in lookup],
+            experience_ids=task_ids + step_ids,
+            action=node.action,
+            observation=node.observation,
+        ))
+    return turns
+
+
+def trajectory_reflector_examples(tree, k=10, seed=0, zero_success_quota=0):
+    """Pick the k questions with the LOWEST leaf success rate that still have at least one
+    successful and one failed leaf (ties broken at random), and return for each one failed
+    and one successful root-to-leaf trajectory with the experiences injected at every turn.
+
+    zero_success_quota > 0 additionally admits that many all-failed questions (failed
+    trajectory only); default 0.
+    """
+    rng = _random.Random(seed)
+    lookup = _bank_lookup(tree.bank_snapshot)
+    by_q = defaultdict(list)
+    for leaf in tree.leaves:
+        by_q[leaf.uid].append(leaf)
+
+    def has_exp(leaf):
+        return any(tree.nodes[n].new_experience_ids or tree.nodes[n].path_has_T for n in leaf.node_ids)
+
+    solvable, zero = [], []
+    for uid, leaves in by_q.items():
+        rate = statistics.mean(l.reward for l in leaves)
+        if 0 < rate < 1:
+            solvable.append((rate, rng.random(), uid))
+        elif rate == 0:
+            zero.append((rng.random(), uid))
+    solvable.sort()
+    zero.sort()
+    picked = [(uid, True) for _, _, uid in solvable[: max(0, k - zero_success_quota)]]
+    picked += [(uid, False) for _, uid in zero[:zero_success_quota]]
+    picked = picked[:k]
+
+    examples = []
+    for uid, with_success in picked:
+        leaves = by_q[uid]
+        failed = [l for l in leaves if l.reward == 0]
+        failed_exp = [l for l in failed if has_exp(l)]
+        fail_leaf = rng.choice(failed_exp or failed)
+        succ_leaf = rng.choice([l for l in leaves if l.reward > 0]) if with_success else None
+        state = tree.nodes[fail_leaf.node_ids[0]].state_before
+        diverge = 1
+        if succ_leaf is not None:
+            for i, (a, b) in enumerate(zip(fail_leaf.node_ids, succ_leaf.node_ids)):
+                if a != b:
+                    diverge = tree.nodes[a].depth
+                    break
+        examples.append(dict(
+            mode="trajectory_pair",
+            task=state.question,
+            data_source=state.data_source,
+            leaf_success_rate=statistics.mean(l.reward for l in leaves),
+            n_leaves=len(leaves),
+            failed_turns=_turn_records(tree, fail_leaf, lookup),
+            success_turns=_turn_records(tree, succ_leaf, lookup) if succ_leaf else None,
+            divergence_depth=diverge,
+            source_leaf_ids=[fail_leaf.leaf_id] + ([succ_leaf.leaf_id] if succ_leaf else []),
+        ))
+    return examples
+
