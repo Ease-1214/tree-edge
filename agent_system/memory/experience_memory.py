@@ -558,8 +558,9 @@ class ExperienceMemory(BaseMemory):
           EDGE_EMBED_MAX_ROWS rows (default 256): short queries go in big batches, long
           observations in small ones;
         * on CUDA OOM the offending batch is halved and retried (down to one row) and the
-          budget is lowered for later calls; it creeps back up after clean batches, so a
-          single spike does not slow the rest of the run.
+          budget is lowered for later calls; optional autogrowth is controlled by
+          EDGE_EMBED_AUTOGROW. The shared service disables autogrowth for predictable
+          memory usage. Already-packed batches are rechecked after a budget reduction.
         Output rows are identical in content and order to model.encode(texts).
         """
         import numpy as np
@@ -592,9 +593,11 @@ class ExperienceMemory(BaseMemory):
 
         base_budget = int(os.environ.get("EDGE_EMBED_TOKEN_BUDGET", "32768"))
         max_rows = int(os.environ.get("EDGE_EMBED_MAX_ROWS", "256"))
+        allow_growth = os.environ.get("EDGE_EMBED_AUTOGROW", "1").lower() not in {"0", "false", "no"}
         if not hasattr(self, "_embed_budget"):
             self._embed_budget = base_budget
             self._embed_clean = 0
+        self._embed_budget = min(self._embed_budget, base_budget)
 
         batches: List[List[int]] = []
         cur: List[int] = []
@@ -613,8 +616,17 @@ class ExperienceMemory(BaseMemory):
         out: List[Optional[Any]] = [None] * len(uniq_texts)
         stack = list(reversed(batches))
         splits = 0
+        preventive_splits = 0
+        max_successful_tokens = 0
         while stack:
             idx = stack.pop()
+            padded_tokens = len(idx) * max(lengths[k] for k in idx)
+            if len(idx) > 1 and padded_tokens > self._embed_budget:
+                half = len(idx) // 2
+                stack.append(idx[half:])
+                stack.append(idx[:half])
+                preventive_splits += 1
+                continue
             try:
                 embs = model.encode(
                     [uniq_texts[k] for k in idx],
@@ -636,15 +648,22 @@ class ExperienceMemory(BaseMemory):
                 stack.append(idx[half:])
                 stack.append(idx[:half])
                 continue
+            max_successful_tokens = max(max_successful_tokens, padded_tokens)
             for row, k in enumerate(idx):
                 out[k] = embs[row]
             self._embed_clean += 1
-            if self._embed_budget < base_budget and self._embed_clean >= 32:
+            if allow_growth and self._embed_budget < base_budget and self._embed_clean >= 32:
                 self._embed_budget = min(base_budget, int(self._embed_budget * 1.25))
                 self._embed_clean = 0
 
         if splits:
             print(f"T062_EMBED_OOM_SPLIT splits={splits} budget_now={self._embed_budget}", flush=True)
+        self._embed_last_stats = dict(
+            oom_splits=splits, preventive_splits=preventive_splits,
+            budget=self._embed_budget, configured_budget=base_budget,
+            max_rows=max_rows, autogrow=allow_growth,
+            max_successful_padded_tokens=max_successful_tokens,
+        )
         uniq = np.stack([np.asarray(e, dtype=np.float32) for e in out], axis=0)
         return uniq[inverse]
 
