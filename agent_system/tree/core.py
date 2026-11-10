@@ -85,6 +85,7 @@ class TreeRollout:
     audits: list = field(default_factory=list)
     metrics: dict = field(default_factory=dict)
     bank_snapshot: dict = field(default_factory=dict)
+    invalid_action_penalty_coef: float = 0.0
 
     def evaluate_forks(self):
         self.audits = []
@@ -135,8 +136,18 @@ class TreeRollout:
             )
         return self.audits
 
+    def training_advantages(self):
+        coefficient = float(getattr(self, "invalid_action_penalty_coef", 0.0))
+        scores = {
+            leaf.leaf_id: leaf.reward - coefficient * sum(
+                not self.nodes[node_id].valid for node_id in leaf.node_ids
+            )
+            for leaf in self.leaves
+        }
+        return leaf_advantages(self.leaves, scores=scores)
+
     def expanded_rows(self):
-        advantages = leaf_advantages(self.leaves)
+        advantages = self.training_advantages()
         rows = []
         for leaf in sorted(self.leaves, key=lambda x: x.leaf_id):
             for node_id in leaf.node_ids:
@@ -185,11 +196,12 @@ def normalize_action(action):
     return "invalid", ""
 
 
-def leaf_advantages(leaves, epsilon=1e-6):
+def leaf_advantages(leaves, epsilon=1e-6, scores=None):
     groups = defaultdict(dict)
     for leaf in leaves:
-        previous = groups[leaf.uid].setdefault(leaf.leaf_id, leaf.reward)
-        if previous != leaf.reward:
+        reward = leaf.reward if scores is None else scores[leaf.leaf_id]
+        previous = groups[leaf.uid].setdefault(leaf.leaf_id, reward)
+        if previous != reward:
             raise ValueError("A leaf has inconsistent rewards")
     result = {}
     for rewards in groups.values():

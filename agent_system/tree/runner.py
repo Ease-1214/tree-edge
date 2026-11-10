@@ -211,7 +211,11 @@ def tree_progress_metrics(tree):
 def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     config, tokenizer = collector.config, collector.tokenizer
     step = int(gen_batch.meta_info["global_step"])
-    tree = TreeRollout()
+    actor_config = config.actor_rollout_ref.actor
+    tree = TreeRollout(invalid_action_penalty_coef=(
+        float(actor_config.get("invalid_action_penalty_coef", 0.01))
+        if actor_config.get("use_invalid_action_penalty", True) else 0.0
+    ))
     memory = manager.retrieval_memory
     tree.bank_snapshot = deepcopy(memory.experiences)
     questions = list(gen_batch.non_tensor_batch["env_kwargs"])
@@ -565,7 +569,7 @@ def audit_training_tokens(batch, tree, step, path, seed=0):
     from agent_system.tree.core import leaf_advantages
 
     rng = random.Random(seed + step)
-    advantages = leaf_advantages(tree.leaves)
+    advantages = tree.training_advantages()
     samples = {"kd": [], "grpo": []}
     eligible = {"kd": [], "grpo": []}
     R = batch.batch["responses"].shape[1]
