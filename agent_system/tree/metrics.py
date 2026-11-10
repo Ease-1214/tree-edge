@@ -49,7 +49,7 @@ DASHBOARD = [
     ("2_exp/retrieval_top5_share", "retrieval/top5_share"),
     # 3 distillation volume and the with-T risk
     ("3_kd/canonical_rows", "kd/canonical_rows"),
-    ("3_kd/kd_to_pg_ratio", "kd/to_pg_abs_ratio"),
+    ("3_kd/kd_to_pg_ratio", "kd/to_pg_loss_abs_ratio"),
     ("3_kd/student_mass_noT", "kd/no_T/student_mass"),
     ("3_kd/student_mass_withT", "kd/with_T/student_mass"),
     ("3_kd/kl_noT", "kd/no_T/topk_kl"),

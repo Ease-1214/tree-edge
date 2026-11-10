@@ -850,8 +850,13 @@ class ActorRolloutRefWorker(Worker):
                 raise ValueError("Adapter-only checkpoints require an active PEFT LoRA actor")
             os.makedirs(local_path, exist_ok=True)
             if not os.environ.get("T066_REPLAY_TREE"):
-                from verl.utils.checkpoint.adapter_state import save_adapter_training_state
-                save_adapter_training_state(os.path.join(local_path,f"training_state_rank_{self.rank}.pt"),self.actor_optimizer,self.actor_lr_scheduler)
+                from verl.utils.checkpoint.adapter_state import save_adapter_training_state, raise_checkpoint_errors
+                state_error = None
+                try:
+                    save_adapter_training_state(os.path.join(local_path,f"training_state_rank_{self.rank}.pt"),self.actor_optimizer,self.actor_lr_scheduler)
+                except Exception as error:
+                    state_error = f"rank {self.rank} optimizer/RNG save: {error}"
+                raise_checkpoint_errors(state_error)
         else:
             self.checkpoint_manager.save_checkpoint(local_path=local_path, hdfs_path=hdfs_path, global_step=global_step, max_ckpt_to_keep=max_ckpt_to_keep, track_for_retention=track_for_retention)
         dist.barrier()
@@ -865,6 +870,7 @@ class ActorRolloutRefWorker(Worker):
                 peft_config['task_type'] = peft_config['task_type'].value
                 peft_config['peft_type'] = peft_config['peft_type'].value
                 peft_config['target_modules'] = list(peft_config['target_modules'])
+            adapter_error = None
             try:
                 if isinstance(self.actor_module_fsdp, FSDP):
                     self.actor_module_fsdp = self.actor_module_fsdp.cuda()
@@ -874,9 +880,9 @@ class ActorRolloutRefWorker(Worker):
                         with open(os.path.join(lora_save_path, "adapter_config.json"), "w", encoding='utf-8') as f:
                             json.dump(peft_config, f, ensure_ascii=False, indent=4)
             except Exception as e:
-                if dist.get_rank() == 0:
-                    print(f"[rank-{self.rank}]: Save LoRA Adapter Error ({e})")
-
+                adapter_error = f"rank {self.rank} adapter export: {e}"
+            from verl.utils.checkpoint.adapter_state import raise_checkpoint_errors
+            raise_checkpoint_errors(adapter_error)
             dist.barrier()
             if dist.get_rank() == 0:
                 print(f"[rank-{self.rank}]: Saved LoRA adapter to: {lora_save_path}")

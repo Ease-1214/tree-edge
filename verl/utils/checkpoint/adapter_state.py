@@ -22,3 +22,14 @@ def load_adapter_training_state(path,optimizer,scheduler):
     if data["cuda_rng"] is not None and torch.cuda.is_available():torch.cuda.set_rng_state_all(data["cuda_rng"])
     np.random.set_state(data["numpy_rng"]);random.setstate(data["python_rng"])
     return True
+
+
+def raise_checkpoint_errors(local_error):
+    """Make every rank reject an incomplete checkpoint before advertising success."""
+    errors = [local_error]
+    if torch.distributed.is_initialized():
+        errors = [None] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(errors, local_error)
+    failures = [error for error in errors if error is not None]
+    if failures:
+        raise RuntimeError("Checkpoint save incomplete: " + " | ".join(failures))
