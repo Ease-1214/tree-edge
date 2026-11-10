@@ -55,17 +55,50 @@ def save_tree_checkpoint(trainer, directory):
         )
 
 
+def tree_exposure_counts(tree):
+    """Exposure = one injection of an experience into a RIGHT node (one fork)."""
+    counts = defaultdict(int)
+    for fork in tree.forks.values():
+        for eid in fork.new_experience_ids:
+            counts[str(eid)] += 1
+    return dict(counts)
+
+
+def apply_exposure_counts(experiences, counts, step):
+    """Add exposures to retrieval_count / last_retrieval_step in place.
+
+    The EDGE path increments retrieval_count inside its utility updates; the tree path
+    replaced those updates and never counted, so UCB saw n=0 for every experience
+    (identical exploration bonus) -- T066 step-18 finding.
+    """
+    touched = 0
+    for pool in ("task_experiences", "step_experiences"):
+        for item in experiences.get(pool, []):
+            n = counts.get(str(item.get("experience_id")))
+            if n:
+                item["retrieval_count"] = int(item.get("retrieval_count", 0) or 0) + int(n)
+                item["last_retrieval_step"] = int(step)
+                touched += 1
+    return touched
+
+
 def manage_tree_experiences(trainer, tree):
     cfg = trainer.config.env.tree_experience
     step = int(trainer.global_steps)
     memory = trainer.envs.retrieval_memory
     evidence = trainer.tree_evidence
+    # Count exposures every step (before any window copy of the bank) so the UCB
+    # bonus used by the next step's retrieval reflects real usage.
+    exposure_counts = tree_exposure_counts(tree)
+    exposed = apply_exposure_counts(memory.experiences, exposure_counts, step)
     evidence.record(tree.question_credits())
     evidence.state["contrasts"].extend(fork_reflector_examples(tree))
     metrics = dict(
         tree.metrics,
         **{
             "tree/mode": 1.0,
+            "retrieval/exposures": float(sum(exposure_counts.values())),
+            "retrieval/exposed_experiences": float(exposed),
             "bank/added": 0.0,
             "bank/deleted_negative": 0.0,
             "bank/deleted_capacity": 0.0,

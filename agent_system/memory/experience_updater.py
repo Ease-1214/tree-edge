@@ -66,7 +66,7 @@ class ExperienceUpdater:
                 prompt = prompt.replace(old_description, new_description)
                 prompt = prompt.replace("Generate 1-", "Generate 0-")
                 prompt += "\nFor each object include experience_type: task or step. task is a reusable multi-turn solving strategy, usually from a root fork. step is an action or warning for a concrete state, usually from an internal fork. You may return an empty array and need not produce both types.\n"
-                prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience.")
+                prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience. Write every field as direct advice to the agent: never mention forks, LEFT/RIGHT, scores, subtree success, examples, or why this experience was derived.")
         else:
             prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
         self.last_prompt_domain = domain
