@@ -10,7 +10,8 @@ source "$HOME/.edge_reflector.env"
 unset WANDB_SERVICE __WANDB_SERVICE WANDB_SERVICE_TRANSPORT EXPERIENCES_JSON
 export EXPERIENCE_UPDATE_BASE_URL=http://127.0.0.1:29663/v1
 export EXPERIENCE_UPDATE_MODEL=gpt-6.1-sol
-export T062_ROOT=$ROOT/$MODE PERF_RUN_DIR=$ROOT/$MODE
+export PERF_RUN_DIR=${T069_RUN_DIR:-$ROOT/$MODE}
+export T062_ROOT=$PERF_RUN_DIR
 export T069_RUN_DIR=$PERF_RUN_DIR
 export T069_TRAIN_DATA=$ROOT/data/train.parquet T069_VAL_DATA=$ROOT/data/dev1000.parquet
 export PERF_TAG=formal PERF_QUESTIONS=256 PERF_STEPS=200 PERF_GPUS=4
@@ -20,8 +21,8 @@ export EDGE_REFLECTOR_PROMPT=search EDGE_TOKEN_SELECTION=teacher_topk EDGE_TOP_K
 export ENABLE_EXPERIENCE_EVOLUTION=true ENABLE_DYNAMIC_MANAGEMENT=true EXP_ROLLOUT_WARMUP_STEPS=null
 export T063_REFLECTOR_AUDIT=1
 export WANDB_MODE=online T062_HTTP_PROXY=http://127.0.0.1:29662
-export WANDB_RUN_ID=t069-$MODE-s0-20261111 WANDB_RESUME=${WANDB_RESUME:-allow}
-export WANDB_RUN_GROUP=t069 WANDB_NAME=t069-$MODE-s0 WANDB_TAGS=t069,$MODE,s0,full200
+export WANDB_RUN_ID=${WANDB_RUN_ID:-t069-$MODE-s0-20261111} WANDB_RESUME=${WANDB_RESUME:-allow}
+export WANDB_RUN_GROUP=t069 WANDB_NAME=${WANDB_NAME:-t069-$MODE-s0} WANDB_TAGS=t069,$MODE,s0,full200
 cd "$SOURCE"
 OPTIONS=()
 if [[ "$MODE" == tree ]]; then
@@ -37,5 +38,5 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   "${OPTIONS[@]}" \
   actor_rollout_ref.actor.checkpoint.contents=[lora_adapter] \
   trainer.save_freq=10 trainer.resume_mode=auto \
-  trainer.project_name=tree-edge-search trainer.experiment_name=t069-$MODE-s0 \
+  trainer.project_name=tree-edge-search trainer.experiment_name=$WANDB_NAME \
   "$@"
