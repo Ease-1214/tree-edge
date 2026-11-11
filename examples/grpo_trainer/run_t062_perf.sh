@@ -31,7 +31,7 @@ if [[ "$PERF_MODEL_DTYPE" == "fp32" ]]; then MODEL_DTYPE_ARG=null; else MODEL_DT
 if [[ "$PERF_DYNAMIC_BSZ" == "1" ]]; then DYN=True; else DYN=False; fi
 if [[ "$PERF_EAGER" == "1" ]]; then EAGER=True; FREE_CACHE=True; else EAGER=False; FREE_CACHE=False; fi
 
-RUN_DIR=$ROOT/runs/$PERF_TAG
+RUN_DIR=${PERF_RUN_DIR:-$ROOT/runs/$PERF_TAG}
 mkdir -p "$RUN_DIR"
 
 export PATH=/home/zehao/.conda/envs/tree-edge/bin:/home/zehao/miniforge3/bin:$PATH
