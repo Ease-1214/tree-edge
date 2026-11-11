@@ -664,6 +664,8 @@ class DataParallelPPOActor(BasePPOActor):
             dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         metrics = {}
+        from verl.utils.actor_metric_totals import ActorMetricTotals
+        statistic_totals = ActorMetricTotals(get_torch_device().current_device())
         if edge_distillation_requested:
             append_to_dict(metrics, {"edge/skipped_missing_inputs": float(bool(edge_missing_keys))})
         for epoch in range(self.config.ppo_epochs):
@@ -728,9 +730,7 @@ class DataParallelPPOActor(BasePPOActor):
                             )
 
                         # all return: (bsz, response_length)
-                        calculate_entropy = False
-                        if entropy_coeff != 0:
-                            calculate_entropy = True
+                        calculate_entropy = True
                         entropy, log_prob, student_topk_logits, _ = self._forward_micro_batch(
                             micro_batch=data,
                             temperature=temperature,
@@ -799,7 +799,28 @@ class DataParallelPPOActor(BasePPOActor):
                                 )
                             policy_loss = policy_loss + edge_cfg.get("coef", 1.0) * edge_loss
                             metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
-                            append_to_dict(metrics, edge_metrics)
+                            if edge_token_selection == "teacher_topk":
+                                metrics["edge/teacher_topk_size"] = edge_top_k
+
+                        with torch.no_grad():
+                            stat_expanded, stat_positive, stat_negative = statistic_totals.policy(
+                                data, response_mask, old_log_prob, log_prob, advantages, pg_loss,
+                                entropy, clip_ratio_low, clip_ratio_high, clip_ratio_c)
+                            if self.config.use_kl_loss:
+                                statistic_totals.ratio("actor/kl_loss",
+                                    (kld.detach() * stat_expanded).sum(), stat_expanded.sum())
+                            if edge_distillation_enabled:
+                                stat_kl = stat_mass = stat_gap = stat_gradient = stat_ids = None
+                                if False and active_tree_kd:
+                                    stat_kl, stat_mass, stat_gap = tree_kl, tree_student_mass, tree_gap
+                                    stat_gradient, stat_ids = tree_gradient, teacher_topk_ids
+                                elif not False and edge_token_selection == "teacher_topk":
+                                    stat_s = torch.log_softmax(student_topk_logits.detach().float(),dim=-1)
+                                    stat_t = torch.log_softmax(teacher_topk_logits.detach().float(),dim=-1)
+                                    stat_kl = (stat_s.exp() * (stat_s-stat_t)).sum(-1)
+                                statistic_totals.kd(data, response_mask, stat_expanded, edge_loss,
+                                    False, stat_kl, stat_mass, stat_gap, stat_gradient, stat_ids,
+                                    stat_positive, stat_negative)
 
                         if diagnostic_component == "pg":
                             policy_loss = pg_loss
@@ -821,13 +842,7 @@ class DataParallelPPOActor(BasePPOActor):
                             loss = policy_loss / self.gradient_accumulation
                         loss.backward()
 
-                        data = {
-                            "actor/pg_loss": pg_loss.detach().item(),
-                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                            "actor/ppo_kl": ppo_kl.detach().item(),
-                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                        }
-                        append_to_dict(metrics, data)
+
 
                 grad_norm = self._optimizer_step(diagnostic_component) if diagnostic_component else self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
@@ -838,8 +853,12 @@ class DataParallelPPOActor(BasePPOActor):
             from verl.utils.replica_sync import verify_replica_parameters
             digest = verify_replica_parameters(self.actor_module)
             print(f"T069_RANK_HASH update={self._policy_updates_seen} rank={torch.distributed.get_rank()} sha256={digest}", flush=True)
-        if getattr(self, "_edge_teacher_rows_total", 0):
-            metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
-            self._edge_teacher_rows = self._edge_teacher_rows_total = 0
+        statistic_totals.add("perf/edge_teacher_rows", getattr(self, "_edge_teacher_rows", 0))
+        statistic_totals.add("perf/edge_student_rows", getattr(self, "_edge_teacher_rows_total", 0))
+        self._edge_teacher_rows = self._edge_teacher_rows_total = 0
+        metrics.update(statistic_totals.finalize(float(edge_cfg.get("coef", 1.0))))
+        metrics["actor/pg_loss"] = metrics["actor/pg_loss_expanded"]
+        if "actor/entropy_expanded" in metrics:
+            metrics["actor/entropy_loss"] = metrics["actor/entropy_expanded"]
         metrics["actor/optimizer_steps_per_train_step"] = [self._optimizer_steps_this_update]
         return metrics
