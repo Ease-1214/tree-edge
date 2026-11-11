@@ -9,8 +9,12 @@ def merge_tree_metrics(per_rank):
     for metrics in per_rank:
         for name, value in metrics.items():
             combined[name].extend(value if isinstance(value, list) else [value])
+    global_actor_statistics = all(float(m.get("actor/statistics_global", 0)) == 1 for m in per_rank)
     teacher_rows = sum(combined.get("perf/edge_teacher_rows", []))
     student_rows = sum(combined.get("perf/edge_student_rows", []))
+    if global_actor_statistics:
+        teacher_rows = per_rank[0].get("perf/edge_teacher_rows", 0)
+        student_rows = per_rank[0].get("perf/edge_student_rows", 0)
     combined["perf/edge_teacher_rows"] = teacher_rows
     combined["perf/edge_student_rows"] = student_rows
     combined["perf/edge_teacher_row_fraction"] = teacher_rows / max(1, student_rows)
@@ -49,7 +53,7 @@ DASHBOARD = [
     ("2_exp/retrieval_top5_share", "retrieval/top5_share"),
     # 3 distillation volume and the with-T risk
     ("3_kd/canonical_rows", "kd/canonical_rows"),
-    ("3_kd/kd_to_pg_ratio", "kd/to_pg_loss_abs_ratio"),
+    ("3_kd/kd_to_pg_loss_ratio", "kd/to_pg_loss_abs_ratio"),
     ("3_kd/student_mass_noT", "kd/no_T/student_mass"),
     ("3_kd/student_mass_withT", "kd/with_T/student_mass"),
     ("3_kd/kl_noT", "kd/no_T/topk_kl"),
@@ -58,7 +62,7 @@ DASHBOARD = [
     ("4_health/grad_norm", "actor/grad_norm"),
     ("4_health/pg_loss", "actor/pg_loss_expanded"),
     ("4_health/entropy", "actor/entropy_expanded"),
-    ("4_health/response_length", "response_length/mean"),
+    ("4_health/response_length", "actor/response_length_expanded"),
     ("4_health/search_calls_per_q", "tree/search_calls_per_question"),
     # 5 cost
     ("5_cost/step_seconds", "timing_s/step"),

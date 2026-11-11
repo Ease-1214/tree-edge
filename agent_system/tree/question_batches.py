@@ -33,10 +33,14 @@ def collapse_rows(rows, indices):
                 A_pos=0.0,
                 A_neg=0.0,
                 kd_weight=0.0,
+                positive_adv_count=0,
+                negative_adv_count=0,
                 source_indices=[],
             )
         target = groups[key]
         target["w_tok"] += 1
+        target["positive_adv_count"] += int(row["advantage"] > 0)
+        target["negative_adv_count"] += int(row["advantage"] < 0)
         target["A_pos"] += max(0.0, row["advantage"])
         target["A_neg"] += min(0.0, row["advantage"])
         target["kd_weight"] += row["kd_weight"]
@@ -124,6 +128,10 @@ def prepare_dedup_batch(batch, tree, world_size=4, batching="question_grouped", 
                 [item["A_neg"] for item in items] if items else [0.0],
                 dtype=torch.float32,
             )
+            for sign in ("positive", "negative"):
+                key = sign + "_adv_count"
+                selected.batch[key] = torch.tensor(
+                    [item[key] for item in items] if items else [0.0], dtype=torch.float32)
             selected.batch["dedup_mini"] = torch.full(
                 (len(selected),), mini, dtype=torch.long
             )
@@ -139,6 +147,8 @@ def prepare_dedup_batch(batch, tree, world_size=4, batching="question_grouped", 
                 padding = selected.select_idxs([0] * (width - len(selected)))
                 for key in [
                     "w_tok",
+                    "positive_adv_count",
+                    "negative_adv_count",
                     "A_pos",
                     "A_neg",
                     "kd_weight",

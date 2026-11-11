@@ -661,7 +661,7 @@ class DataParallelPPOActor(BasePPOActor):
                 "kd_canonical", "kd_path_has_T", "is_padding_copy"])
         dedup = "w_tok" in data.batch
         if dedup:
-            select_keys.extend(["w_tok", "A_pos", "A_neg", "dedup_mini", "dedup_mini_weight"])
+            select_keys.extend(["w_tok", "A_pos", "A_neg", "positive_adv_count", "negative_adv_count", "dedup_mini", "dedup_mini_weight"])
         self._tree_monitoring = tree_batch
         batch = data.select(batch_keys=select_keys).batch
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
@@ -682,7 +682,8 @@ class DataParallelPPOActor(BasePPOActor):
             if len({int(value.item()) for value in counts}) != 1:
                 raise RuntimeError("Actor minibatch counts differ across replica ranks")
         metrics = {}
-        monitor_totals = torch.zeros(3, dtype=torch.float64, device=get_torch_device().current_device())
+        from verl.utils.actor_metric_totals import ActorMetricTotals
+        statistic_totals = ActorMetricTotals(get_torch_device().current_device())
         micro_batch_count = 0
         if edge_distillation_requested:
             append_to_dict(metrics, {"edge/skipped_missing_inputs": float(bool(edge_missing_keys))})
@@ -839,16 +840,10 @@ class DataParallelPPOActor(BasePPOActor):
                         if edge_distillation_enabled:
                             if tree_batch:
                                 if active_tree_kd:
-                                    from agent_system.tree.loss import tree_topk_loss, tree_kd_metrics
+                                    from agent_system.tree.loss import tree_topk_loss
                                     edge_loss, tree_kl, tree_gradient = tree_topk_loss(tree_student_logits,
                                         teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask)
-                                    edge_metrics = tree_kd_metrics(tree_kl, tree_student_mass, data["edge_distill_weight"],
-                                        response_mask, data["kd_path_has_T"], tree_gap, tree_gradient,
-                                        teacher_topk_ids, responses, advantages)
-                                    edge_metrics.update({"kd/weighted_loss_all_tokens":float(edge_loss.detach()),
-                                        "kd/active_token_rate":float((response_mask*(data["edge_distill_weight"]>0).unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
-                                        "kd/effective_weight_sum_over_N":float((response_mask*data["edge_distill_weight"].unsqueeze(-1)).sum()/response_mask.sum().clamp_min(1)),
-                                        "kd/to_pg_loss_abs_ratio":float(edge_cfg.get("coef", 1.0)*edge_loss.detach().abs()/(pg_loss.detach().abs()+1e-6))})
+                                    edge_metrics = {}
                                 else:
                                     edge_loss = log_prob.sum()*0
                                     edge_metrics = {"kd/weighted_loss_all_tokens":0., "kd/active_token_rate":0.}
@@ -873,7 +868,28 @@ class DataParallelPPOActor(BasePPOActor):
                                 )
                             policy_loss = policy_loss + edge_cfg.get("coef", 1.0) * edge_loss
                             metrics["edge/coef"] = edge_cfg.get("coef", 1.0)
-                            append_to_dict(metrics, edge_metrics)
+                            if edge_token_selection == "teacher_topk":
+                                metrics["edge/teacher_topk_size"] = edge_top_k
+
+                        with torch.no_grad():
+                            stat_expanded, stat_positive, stat_negative = statistic_totals.policy(
+                                data, response_mask, old_log_prob, log_prob, advantages, pg_loss,
+                                entropy, clip_ratio_low, clip_ratio_high, clip_ratio_c)
+                            if self.config.use_kl_loss:
+                                statistic_totals.ratio("actor/kl_loss",
+                                    (kld.detach() * stat_expanded).sum(), stat_expanded.sum())
+                            if edge_distillation_enabled:
+                                stat_kl = stat_mass = stat_gap = stat_gradient = stat_ids = None
+                                if tree_batch and active_tree_kd:
+                                    stat_kl, stat_mass, stat_gap = tree_kl, tree_student_mass, tree_gap
+                                    stat_gradient, stat_ids = tree_gradient, teacher_topk_ids
+                                elif not tree_batch and edge_token_selection == "teacher_topk":
+                                    stat_s = torch.log_softmax(student_topk_logits.detach().float(),dim=-1)
+                                    stat_t = torch.log_softmax(teacher_topk_logits.detach().float(),dim=-1)
+                                    stat_kl = (stat_s.exp() * (stat_s-stat_t)).sum(-1)
+                                statistic_totals.kd(data, response_mask, stat_expanded, edge_loss,
+                                    tree_batch, stat_kl, stat_mass, stat_gap, stat_gradient, stat_ids,
+                                    stat_positive, stat_negative)
 
                         if diagnostic_component == "pg":
                             policy_loss = pg_loss
@@ -882,9 +898,6 @@ class DataParallelPPOActor(BasePPOActor):
                             policy_loss = edge_cfg.get("coef", 1.0) * edge_loss
                         expanded_mask = response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask
                         expanded_tokens = expanded_mask.sum()
-                        monitor_totals[0] += (entropy.detach() * expanded_mask).sum().double() if entropy is not None else 0
-                        monitor_totals[1] += pg_loss.detach().double() * expanded_tokens
-                        monitor_totals[2] += expanded_tokens
                         if self._explicit_replica_sync:
                             # Accumulate local numerators with one shared global denominator.
                             # The gradient collective below averages ranks, hence world_size.
@@ -901,34 +914,25 @@ class DataParallelPPOActor(BasePPOActor):
                             loss = policy_loss / self.gradient_accumulation
                         loss.backward()
 
-                        data = {
-                            "actor/pg_loss": pg_loss.detach().item(),
-                            "actor/pg_clipfrac": pg_clipfrac.detach().item(),
-                            "actor/ppo_kl": ppo_kl.detach().item(),
-                            "actor/pg_clipfrac_lower": pg_clipfrac_lower.detach().item(),
-                        }
-                        append_to_dict(metrics, data)
+
 
                 grad_norm = self._optimizer_step(diagnostic_component) if diagnostic_component else self._optimizer_step()
                 data = {"actor/grad_norm": grad_norm.detach().item()}
                 append_to_dict(metrics, data)
-                print(f"T066_MINI index={batch_idx} pg_loss={metrics.get('actor/pg_loss', [])} grad_norm={float(grad_norm)}", flush=True)
+                print(f"T066_MINI index={batch_idx} pg_loss={float(pg_loss.detach())} grad_norm={float(grad_norm)}", flush=True)
         self.actor_optimizer.zero_grad()
-        if torch.distributed.is_initialized():
-            torch.distributed.all_reduce(monitor_totals, op=torch.distributed.ReduceOp.SUM)
-        metrics["actor/pg_loss_expanded"] = float(monitor_totals[1] / monitor_totals[2].clamp_min(1))
-        if tree_batch or entropy_coeff != 0:
-            metrics["actor/entropy_expanded"] = float(monitor_totals[0] / monitor_totals[2].clamp_min(1))
         self._policy_updates_seen = getattr(self, "_policy_updates_seen", 0) + int(diagnostic_component is None)
         if self._explicit_replica_sync and diagnostic_component is None and self._policy_updates_seen <= 2:
             from verl.utils.replica_sync import verify_replica_parameters
             digest = verify_replica_parameters(self.actor_module)
             print(f"T069_RANK_HASH update={self._policy_updates_seen} rank={torch.distributed.get_rank()} sha256={digest}", flush=True)
-        if getattr(self, "_edge_teacher_rows_total", 0):
-            metrics["perf/edge_teacher_row_fraction"] = self._edge_teacher_rows / self._edge_teacher_rows_total
-            metrics["perf/edge_teacher_rows"] = self._edge_teacher_rows
-            metrics["perf/edge_student_rows"] = self._edge_teacher_rows_total
-            self._edge_teacher_rows = self._edge_teacher_rows_total = 0
+        statistic_totals.add("perf/edge_teacher_rows", getattr(self, "_edge_teacher_rows", 0))
+        statistic_totals.add("perf/edge_student_rows", getattr(self, "_edge_teacher_rows_total", 0))
+        self._edge_teacher_rows = self._edge_teacher_rows_total = 0
+        metrics.update(statistic_totals.finalize(float(edge_cfg.get("coef", 1.0))))
+        metrics["actor/pg_loss"] = metrics["actor/pg_loss_expanded"]
+        if "actor/entropy_expanded" in metrics:
+            metrics["actor/entropy_loss"] = metrics["actor/entropy_expanded"]
         metrics["actor/optimizer_steps_per_train_step"] = [self._optimizer_steps_this_update]
         metrics["actor/effective_minibatch_rows_per_rank"] = self.config.ppo_mini_batch_size
         metrics["actor/micro_batch_count"] = micro_batch_count

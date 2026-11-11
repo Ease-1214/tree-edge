@@ -65,3 +65,11 @@ def test_four_rank_cpu_collective(tmp_path):
             if child.is_alive():
                 child.terminate()
                 child.join()
+
+
+def test_global_actor_counts_are_not_summed_twice():
+    local={"actor/statistics_global":1.,"perf/edge_teacher_rows":6.,"perf/edge_student_rows":40.}
+    merged=merge_tree_metrics([local]*4)
+    assert merged["perf/edge_teacher_rows"]==6
+    assert merged["perf/edge_student_rows"]==40
+    assert merged["perf/edge_teacher_row_fraction"]==.15

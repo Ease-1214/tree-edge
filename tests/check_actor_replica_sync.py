@@ -48,7 +48,8 @@ def batch(rank,device,dedup,baseline=False):
                 kwargs.pop(key)
     if dedup:
         weights=torch.arange(1,B+1,device=device).float()
-        kwargs.update(w_tok=weights,A_pos=kwargs["advantages"][:,0].clamp_min(0)*weights,
+        kwargs.update(w_tok=weights,positive_adv_count=(kwargs["advantages"][:,0]>0)*weights,
+            negative_adv_count=(kwargs["advantages"][:,0]<0)*weights,A_pos=kwargs["advantages"][:,0].clamp_min(0)*weights,
             A_neg=kwargs["advantages"][:,0].clamp_max(0)*weights,
             dedup_mini=torch.zeros(B,dtype=torch.long,device=device),
             dedup_mini_weight=torch.ones(B,device=device))
