@@ -41,7 +41,10 @@ def average_replica_gradients(module):
     offset = 0
     for parameter in active:
         gradient = gradients[offset:offset + parameter.numel()].view_as(parameter)
-        if parameter.grad is None:
+        # FSDP no_sync retains gradients in its compute dtype (bf16), while
+        # master LoRA parameters and Adam moments remain fp32. copy_ alone
+        # preserves the wrong grad dtype and makes foreach AdamW fail.
+        if parameter.grad is None or parameter.grad.dtype != parameter.dtype:
             parameter.grad = gradient.to(parameter.dtype).clone()
         else:
             parameter.grad.copy_(gradient)
