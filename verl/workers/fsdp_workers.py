@@ -697,7 +697,7 @@ class ActorRolloutRefWorker(Worker):
 
             lr = self.actor_lr_scheduler.get_last_lr()[0]
             metrics["actor/lr"] = lr
-            metrics["ckpt/optimizer_restored"] = float(getattr(self.checkpoint_manager, "optimizer_restored", True))
+            metrics["ckpt/optimizer_restored"] = float(getattr(self.checkpoint_manager, "optimizer_restored", False))
             self.actor_lr_scheduler.step()
 
             # TODO: here, we should return all metrics
