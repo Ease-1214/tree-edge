@@ -46,6 +46,9 @@ class ExperienceUpdater:
         self.max_new_experiences_per_update = max_new_experiences_per_update
         self.token_limit_param = token_limit_param
         self.update_history = []
+        # Safe defaults for intervals with no contrast examples.
+        self.last_update_succeeded = False
+        self.last_failure_reason = None
 
     def _audit_request(self, request):
         self._audit_request_count += 1

@@ -1824,7 +1824,7 @@ class RayPPOTrainer:
         )
 
         metrics.update({
-            "reflector/failed": float(not self.experience_updater.last_update_succeeded),
+            "reflector/failed": float(not getattr(self.experience_updater, "last_update_succeeded", False)),
             "reflector/submitted": float(len(contrast_examples)),
             "reflector/skip_reason": 0.0,
         })
