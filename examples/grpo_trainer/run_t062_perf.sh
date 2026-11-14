@@ -50,7 +50,7 @@ export EDGE_EMBED_MAX_ROWS=${EDGE_EMBED_MAX_ROWS:-256}
 export EDGE_EMBED_DTYPE=${EDGE_EMBED_DTYPE:-bf16}
 export EDGE_EMBED_MEM_GB=${EDGE_EMBED_MEM_GB:-0}                 # >0 caps the embedding process (e.g. 4 when sharing a GPU)
 export CC=/home/zehao/.conda/envs/tree-edge/bin/x86_64-conda-linux-gnu-cc
-export RAY_ADDRESS=local RAY_TMPDIR=$ROOT/r
+export RAY_ADDRESS=local RAY_TMPDIR=${RAY_TMPDIR:-$ROOT/r}
 export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1
 export ENABLE_EXPERIENCE_EVOLUTION=${ENABLE_EXPERIENCE_EVOLUTION:-false} ENABLE_DYNAMIC_MANAGEMENT=true ENABLE_EXP_ROLLOUT=true

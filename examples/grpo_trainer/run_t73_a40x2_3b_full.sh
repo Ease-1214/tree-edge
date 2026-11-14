@@ -7,7 +7,9 @@ set +x
 
 ROOT=/home/zehao/echo-collab/T073
 export TMPDIR="$ROOT/tmp" XDG_CACHE_HOME="$ROOT/cache" TORCH_EXTENSIONS_DIR="$ROOT/torch_extensions"
-mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR"
+export RAY_TMPDIR=/dev/shm/t73-31-ray
+mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR" "$RAY_TMPDIR"
+chmod 700 "$RAY_TMPDIR"
 T70_ROOT=/home/zehao/echo-collab/T070
 DATA_ROOT=/home/zehao/echo-collab/T069
 SOURCE=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
