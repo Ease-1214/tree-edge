@@ -112,7 +112,7 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   actor_rollout_ref.model.lora_alpha=128 \
   actor_rollout_ref.actor.ppo_mini_batch_size=256 \
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=4 \
-  actor_rollout_ref.rollout.max_num_seqs=128 \
+  actor_rollout_ref.rollout.max_num_seqs=512 \
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
   actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
   "$@"
