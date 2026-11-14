@@ -7,6 +7,7 @@ set +x
 
 ROOT=/home/zehao/echo-collab/T073
 export TMPDIR="$ROOT/tmp" XDG_CACHE_HOME="$ROOT/cache" TORCH_EXTENSIONS_DIR="$ROOT/torch_extensions"
+export TRITON_LIBCUDA_PATH="$ROOT/cuda-driver-link"
 export RAY_TMPDIR=/dev/shm/t73-31-ray
 mkdir -p "$TMPDIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR" "$RAY_TMPDIR"
 chmod 700 "$RAY_TMPDIR"
