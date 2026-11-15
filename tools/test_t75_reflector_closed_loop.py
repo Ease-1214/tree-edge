@@ -191,7 +191,7 @@ def run_offline_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
         {
             "experience_id": "exp_000100",
             "experience_type": "step",
-            "task_type": "multi_hop",
+            "task_type": "multi_hop_reasoning",
             "trigger": "A retrieved passage mentions the target work and year, but truncates the sentence before stating the requested attribute while naming other years' attributes.",
             "recommended_action": "Issue a narrower search combining the exact title in quotes, the release year, and the target role instead of answering from another year's entry.",
             "avoid_action": "Selecting a director or attribute from an earlier or later adaptation.",
@@ -206,7 +206,7 @@ def run_offline_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
         {
             "experience_id": "exp_000101",
             "experience_type": "task",
-            "task_type": "multi_hop",
+            "task_type": "multi_hop_reasoning",
             "trigger": "The question asks for the county or jurisdiction of the company that acquired a named subsidiary in a specific year.",
             "recommended_action": "First identify the acquiring parent company from the acquisition event, then verify the county of the parent company's headquarters rather than the subsidiary's city.",
             "avoid_action": "Answering with the city or county of the acquired company.",
@@ -221,7 +221,7 @@ def run_offline_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
         {
             "experience_id": "exp_000102",
             "experience_type": "task",
-            "task_type": "entity_disambiguation",
+            "task_type": "direct_retrieval",
             "trigger": "A question asks who sang or performed a song, and search results mention its writer, original recording, and later cover versions.",
             "recommended_action": "Match the specific performer or recording version requested by the question before answering.",
             "avoid_action": "Answering with the composer when the performer is asked.",

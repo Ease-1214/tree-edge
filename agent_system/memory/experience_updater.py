@@ -349,14 +349,17 @@ Return ONLY a JSON array of experience objects.
     # ------------------------------------------------------------------ #
 
     SEARCH_TASK_TYPES = (
-        "single_fact",
-        "bridge_entity",
-        "comparison",
-        "temporal_disambiguation",
-        "evidence_verification",
+        "general",
         "direct_retrieval",
         "entity_attribute_lookup",
         "multi_hop_reasoning",
+        "comparison",
+        "temporal",
+        "numeric",
+        "list_intersection",
+        "source_identification",
+        "location_chain",
+        "answer_normalization",
     )
 
     def _prompt_domain(self, current_experiences: Dict) -> str:

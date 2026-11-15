@@ -252,3 +252,87 @@ def test_sft_weight_excludes_invalid_actions_in_rescued_trajectory():
     assert rows["N1_invalid"]["sft_weight"] == 0.0
     assert rows["N2_valid"]["sft_weight"] == 1.0
 
+
+def test_clean_wandb_metrics_groups_into_six_panels():
+    from agent_system.tree.metrics import build_clean_wandb_metrics
+
+    raw = {
+        # 1_eval fallbacks and dynamic val_<src>_em
+        "val/success_rate": 0.42,
+        "val/macro_em": 0.39,
+        "val/hotpotqa_success_rate": 0.51,
+        "val/2wikimultihopqa_success_rate": 0.33,
+        "natural/pass_rate": 0.45,
+        "success/pure_noexp": 0.40,  # should prefer natural/pass_rate
+        "tree/rescue_rate": 0.25,
+        "success/leaf_mean": 0.60,
+        # 2_tree_exp
+        "tree/trigger_rate": 0.55,
+        "gate/fork_count": 12,
+        "exp_ab/task_T/delta_mean": 0.08,
+        "exp_ab/step_S/delta_mean": 0.04,
+        "exp_ab/all/helped_rate": 0.30,
+        "exp_ab/all/harmed_rate": 0.05,
+        "gate/same_action_rate": 0.15,
+        # 3_memory
+        "bank/size": 34,
+        "bank/utility_mean": 0.12,
+        "bank/utility_positive_rate": 0.65,
+        "retrieval/exposed_experiences": 28,
+        "reflector/submitted": 4,
+        "reflector/added_task": 2,
+        "reflector/added_step": 1,
+        "bank/deleted_negative": 1,
+        "bank/deleted_capacity": 0,
+        # 4_loss (testing fallback aliases and NaN filtering)
+        "actor/pg_loss": -0.02,
+        "kd/weighted_loss_active_tokens": 0.14,
+        "kd/canonical_rows": 16,
+        "sft/loss_token_mean": 0.75,
+        "sft/active_rows": 8,
+        "actor/grad_norm": 1.2,
+        "actor/ppo_kl": 0.004,
+        "actor/pg_clipfrac": 0.03,
+        "actor/lr": 1e-6,
+        # 5_behavior
+        "episode/valid_action_ratio": 0.96,
+        "tree/search_calls_per_question": 2.4,
+        "actor/response_length_expanded": 180.0,
+        # 6_perf
+        "timing_s/step": 42.5,
+        "timing_s/gen": 18.0,
+        "timing_s/update_actor": 14.0,
+        "timing_s/experience_management": 6.5,
+        "perf/max_memory_allocated_gb": 21.3,
+        "perf/throughput": 1250.0,
+        # Noisy / NaN / Inf keys that must be excluded
+        "raw/noisy_debug_metric": 999.0,
+        "1_main/legacy_key": 0.1,
+        "actor/entropy": float("nan"),
+        "perf/edge_teacher_rows": float("inf"),
+        "val/strict_em": float("nan"),  # should fall back to val/success_rate
+    }
+
+    cleaned = build_clean_wandb_metrics(raw)
+    assert cleaned["1_eval/val_strict_em"] == pytest.approx(0.42)
+    assert cleaned["1_eval/val_macro_em"] == pytest.approx(0.39)
+    assert cleaned["1_eval/val_hotpotqa_em"] == pytest.approx(0.51)
+    assert cleaned["1_eval/val_2wikimultihopqa_em"] == pytest.approx(0.33)
+    assert cleaned["1_eval/train_natural_pass_rate"] == pytest.approx(0.45)
+    assert cleaned["1_eval/train_tree_rescue_rate"] == pytest.approx(0.25)
+    assert cleaned["1_eval/train_leaf_mean_reward"] == pytest.approx(0.60)
+    assert cleaned["2_tree_exp/task_delta_mean"] == pytest.approx(0.08)
+    assert cleaned["3_memory/bank_size"] == pytest.approx(34.0)
+    assert cleaned["4_loss/pg_loss"] == pytest.approx(-0.02)
+    assert cleaned["4_loss/opsd_loss"] == pytest.approx(0.14)
+    assert cleaned["4_loss/opsd_active_rows"] == pytest.approx(16.0)
+    assert cleaned["5_behavior/valid_action_ratio"] == pytest.approx(0.96)
+    assert cleaned["6_perf/reflector_time_s"] == pytest.approx(6.5)
+
+    allowed_prefixes = ("1_eval/", "2_tree_exp/", "3_memory/", "4_loss/", "5_behavior/", "6_perf/")
+    assert all(k.startswith(allowed_prefixes) for k in cleaned)
+    assert "raw/noisy_debug_metric" not in cleaned
+    assert "1_main/legacy_key" not in cleaned
+    assert "val/strict_em" not in cleaned
+
+

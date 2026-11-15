@@ -2119,7 +2119,15 @@ class RayPPOTrainer:
             self._maybe_save_best_checkpoint(val_metrics)
             pprint(f"Initial validation metrics: {val_metrics}")
             # T70 initial baseline uses Dev1000 only. Test6125 begins at step 50.
-            logger.log(data=val_metrics, step=self.global_steps)
+            wandb_val_metrics = val_metrics
+            if (
+                self.config.env.get("tree_experience", {}).get("enable", False)
+                and os.environ.get("WANDB_LOG_RAW_METRICS", "0") != "1"
+            ):
+                from agent_system.tree.metrics import build_clean_wandb_metrics
+
+                wandb_val_metrics = build_clean_wandb_metrics(val_metrics)
+            logger.log(data=wandb_val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
 
@@ -2436,15 +2444,20 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
-                if self.config.env.get("tree_experience", {}).get("enable", False):
+                tree_enabled = self.config.env.get("tree_experience", {}).get("enable", False)
+                if tree_enabled:
                     from agent_system.tree.metrics import dashboard_metrics
                     metrics.update(dashboard_metrics(metrics))
                 # TODO: make a canonical logger that supports various backend
-                if self.config.env.get("tree_experience", {}).get("enable", False):
+                if tree_enabled:
                     import json
                     with open(Path(self.config.trainer.default_local_dir).parent / "step_metrics.jsonl", "a") as handle:
                         handle.write(json.dumps(metrics, default=lambda value: float(value))+"\n")
-                logger.log(data=metrics, step=self.global_steps)
+                wandb_metrics = metrics
+                if tree_enabled and os.environ.get("WANDB_LOG_RAW_METRICS", "0") != "1":
+                    from agent_system.tree.metrics import build_clean_wandb_metrics
+                    wandb_metrics = build_clean_wandb_metrics(metrics)
+                logger.log(data=wandb_metrics, step=self.global_steps)
 
                 progress_bar.update(1)
                 self.global_steps += 1
