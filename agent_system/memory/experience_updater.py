@@ -14,6 +14,7 @@ import queue
 from typing import Any, Dict, List, Optional
 
 from openai import OpenAI
+from .experience_type_validation import CLASSIFICATION_GUIDANCE, validate_experience_types
 
 
 class ExperienceUpdater:
@@ -49,6 +50,8 @@ class ExperienceUpdater:
         # Safe defaults for intervals with no contrast examples.
         self.last_update_succeeded = False
         self.last_failure_reason = None
+        self.last_classification_stats = {}
+        self.last_classification_decisions = []
 
     def _audit_request(self, request):
         self._audit_request_count += 1
@@ -83,6 +86,11 @@ class ExperienceUpdater:
         failed_trajectories: List[Dict],
         current_experiences: Dict,
     ) -> List[Dict]:
+        self.last_classification_stats = dict(
+            submitted=0, accepted=0, rejected=0,
+            ambiguous=0, failed=0, invalid_type_dropped=0,
+        )
+        self.last_classification_decisions = []
         if not failed_trajectories:
             return []
 
@@ -99,10 +107,12 @@ class ExperienceUpdater:
                     old_description = "Each example below is a contrast on the SAME question and the SAME turn: the rollout that received the listed experiences failed, while the rollout without any experience succeeded. So the injected experience either misled the agent or failed to prevent a mistake."
                     new_description = "Each example is a fork at one identical search state. LEFT omits only this turn's new experiences; RIGHT adds them. Both sides may retain earlier task experience. The actions shown are this turn's real actions; scores are terminal subtree success fractions. Delta=RIGHT-LEFT can show helped, harmed, or neutral evidence. Distill a reusable strategy from either sign without treating a noisy fork as certain causality."
                     prompt = prompt.replace(old_description, new_description)
-                    prompt += "\nFor each object include experience_type: task or step. task is a reusable multi-turn solving strategy, usually from a root fork. step is an action or warning for a concrete state, usually from an internal fork. You need not produce both types.\n"
+                    prompt += "\nFor each object include experience_type: task or step. Classify strictly by what information the trigger needs; source Fork depth is not a criterion. You need not produce both types.\n"
                     prompt = prompt.replace("Use the successful no-experience rollout to see what worked, and the injected experience to see what went wrong.", "Compare the two actions and subtree scores to identify a useful strategy or a harmful application of experience. Write every field as direct advice to the agent: never mention forks, LEFT/RIGHT, scores, subtree success, examples, or why this experience was derived.")
             else:
                 prompt = self._build_analysis_prompt(failed_trajectories, current_experiences, next_exp_idx)
+            if domain == "search":
+                prompt += "\n" + CLASSIFICATION_GUIDANCE
             self.last_prompt_domain = domain
 
         except (ValueError, TypeError) as error:
@@ -131,6 +141,42 @@ class ExperienceUpdater:
                 self.last_failure_reason = "invalid_response_schema"
             if domain == "search":
                 raw_experiences = self._postprocess_search_experiences(raw_experiences, failed_trajectories)
+                self.last_classification_stats["invalid_type_dropped"] = int(
+                    getattr(self, "last_invalid_fork_type_dropped", 0)
+                )
+                # T73 Fork + EDGE generates and classifies in the first API
+                # call. One additional BATCH call independently audits the
+                # actual triggers. Never rewrite or silently relabel output.
+                if any(t.get("fork_id") for t in failed_trajectories) and raw_experiences:
+                    self.last_classification_stats["submitted"] = len(raw_experiences)
+                    try:
+                        raw_experiences, decisions = validate_experience_types(
+                            raw_experiences, self._completion_with_deadline,
+                            model=self.model,
+                            token_limit_param=self.token_limit_param,
+                            max_completion_tokens=self.max_completion_tokens,
+                        )
+                    except Exception as error:
+                        self.last_classification_stats["failed"] = (
+                            self.last_classification_stats["submitted"]
+                        )
+                        self.last_failure_reason = "classification_validation_failed"
+                        self.last_update_succeeded = False
+                        print("[ExperienceUpdater] classification validation failed: "
+                              + type(error).__name__, flush=True)
+                        return []  # fail closed; leave the live bank unchanged
+                    self.last_classification_decisions = decisions
+                    self.last_classification_stats["accepted"] = len(raw_experiences)
+                    self.last_classification_stats["rejected"] = sum(
+                        not x["accepted"] for x in decisions
+                    )
+                    self.last_classification_stats["ambiguous"] = sum(
+                        x["inferred_type"] == "ambiguous" for x in decisions
+                    )
+                    for decision in decisions:
+                        if not decision["accepted"]:
+                            print("[ExperienceUpdater] classification rejected: "
+                                  + json.dumps(decision, ensure_ascii=False), flush=True)
             reassigned = self._reassign_exp_ids(raw_experiences, next_exp_idx)
             self.update_history.append(
                 {
@@ -596,7 +642,13 @@ Return ONLY a JSON array of experience objects.
         # exact-fingerprint bank upsert. No second answer-string novelty gate.
         is_edge_fork = any(t.get("fork_id") for t in failed_trajectories) and not is_v3
         self.last_invalid_v3_dropped = 0
+        self.last_invalid_fork_type_dropped = 0
         for exp in experiences:
+            # For T73 Fork + EDGE, invalid/missing labels are errors rather
+            # than an invitation to guess from the source Fork depth.
+            if is_edge_fork and exp.get("experience_type") not in ("task", "step"):
+                self.last_invalid_fork_type_dropped += 1
+                continue
             if is_v3:
                 # LLMs may use the human-facing T/S abbreviations even when
                 # asked for task/step. This is a schema alias, NOT inference

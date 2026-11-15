@@ -1,0 +1,229 @@
+{
+  "baseline": {
+    "total": 7,
+    "accepted": 5,
+    "rejected": 2,
+    "decisions": [
+      {
+        "step": 5,
+        "experience_type": "task",
+        "trigger": "A question asks who sang a song whose search results mention an original recording and one or more later cover versions.",
+        "state_cues": [
+          "The question asks who sang a song",
+          "Search results mention multiple recordings or performers",
+          "A passage distinguishes songwriting from recording"
+        ],
+        "index": 1,
+        "declared_type": "task",
+        "inferred_type": "step",
+        "accepted": false,
+        "reason": "The trigger requires search results that mention an original recording and later covers, so applicability depends on observed results."
+      },
+      {
+        "step": 5,
+        "experience_type": "task",
+        "trigger": "A question asks for a historical first involving a procedure, where \"first performed,\" \"first successful,\" and \"first to survive\" may refer to different milestones.",
+        "state_cues": [
+          "The question uses \"first\"",
+          "The topic has separate milestones for performance, success, or survival",
+          "Search results describe different people in different roles"
+        ],
+        "index": 2,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The requested historical milestone and possible distinctions are recognizable from the question; search results are checked afterward."
+      },
+      {
+        "step": 10,
+        "experience_type": "task",
+        "trigger": "A question asks for an attribute of a person identified indirectly through their appearance in a named work, especially when the work has multiple cast members.",
+        "state_cues": [
+          "person identified by appearance in a named work",
+          "multiple people associated with the work",
+          "requested fact is about the person rather than the work"
+        ],
+        "index": 3,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The trigger is identifiable from the question’s indirect reference to a person in a named work; subsequent searches verify the person and attribute."
+      },
+      {
+        "step": 10,
+        "experience_type": "task",
+        "trigger": "A question asks for a quantitative attribute of a geographic entity that must first be identified through a road, route, landmark, or other place.",
+        "state_cues": [
+          "wording such as containing, located in, or passes through",
+          "a named road or geographic feature",
+          "a population or other statistic with a census or year qualifier"
+        ],
+        "index": 4,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The question’s geographic relationship and requested statistic identify the strategy; resolving the entity is a later search action."
+      },
+      {
+        "step": 10,
+        "experience_type": "task",
+        "trigger": "A question describes a country or sovereign entity as being within a city, and asks for that entity rather than the city itself.",
+        "state_cues": [
+          "country described as within a city",
+          "a landmark or structure tied to a historical builder",
+          "question asks for the country rather than the city"
+        ],
+        "index": 5,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The trigger is stated in the question as asking for a country or sovereign entity within a city."
+      },
+      {
+        "step": 15,
+        "experience_type": "task",
+        "trigger": "A question identifies a film or other work through a plot, legend, adaptation, or subject clue and asks for the creator of a related work.",
+        "state_cues": [
+          "A work is identified indirectly by its inspiration or subject",
+          "The question asks who wrote or directed a related work",
+          "The title may refer to multiple works"
+        ],
+        "index": 6,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The question’s work clue and requested creator role identify the strategy; verification happens after searching."
+      },
+      {
+        "step": 15,
+        "experience_type": "task",
+        "trigger": "A question asks where a person placed or which installments of a recurring competition they appeared in, using vague wording such as asking where they came on the show.",
+        "state_cues": [
+          "A person competed or appeared on a recurring show",
+          "The question uses vague placement wording",
+          "The passage lists multiple series, seasons, or competition outcomes"
+        ],
+        "index": 7,
+        "declared_type": "task",
+        "inferred_type": "ambiguous",
+        "accepted": false,
+        "reason": "The trigger combines vague placement wording with conditions about competition outcomes and multiple appearances, which may require search results to establish."
+      }
+    ]
+  },
+  "revised": {
+    "total": 7,
+    "accepted": 6,
+    "rejected": 1,
+    "decisions": [
+      {
+        "step": 5,
+        "experience_type": "step",
+        "trigger": "The question asks for a single fact about a named entity, and the available search results already explicitly state that fact.",
+        "state_cues": [
+          "one requested fact",
+          "named entity",
+          "passage explicitly states the answer",
+          "entity and requested relation match"
+        ],
+        "index": 1,
+        "declared_type": "step",
+        "inferred_type": "step",
+        "accepted": true,
+        "reason": "Applicability requires search results that already state the fact for the correct entity."
+      },
+      {
+        "step": 5,
+        "experience_type": "task",
+        "trigger": "The question asks for an entity reached through a chain of relations, such as identifying a company and then asking who acquired it.",
+        "state_cues": [
+          "question contains successive relations",
+          "an entity is described through an earlier event",
+          "requested answer is the endpoint of the chain",
+          "event or time qualifier constrains the relation"
+        ],
+        "index": 2,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The trigger is recognizable from the question's relation chain alone; checking results is part of the recommended action."
+      },
+      {
+        "step": 5,
+        "experience_type": "task",
+        "trigger": "The question asks when a named program, series, or other work first began, aired, or was released.",
+        "state_cues": [
+          "when did",
+          "first start",
+          "began airing",
+          "premiere or first episode"
+        ],
+        "index": 3,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The trigger is a question asking when a named work first began, aired, or was released."
+      },
+      {
+        "step": 10,
+        "experience_type": "task",
+        "trigger": "The question describes a chain from an entity or event to a related entity, then asks for an attribute of that related entity.",
+        "state_cues": [
+          "Question asks where a landmark or structure is located",
+          "Question embeds a creator, event, or institution in a location chain",
+          "Requested answer is one relation beyond the entity named in the first useful passage"
+        ],
+        "index": 4,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The trigger is a question describing a relation chain and asking for a related entity's attribute."
+      },
+      {
+        "step": 10,
+        "experience_type": "step",
+        "trigger": "A passage identifies the entity associated with a requested statistic, but gives no statistic for the smaller feature, route, or subarea itself.",
+        "state_cues": [
+          "Question asks for a statistic of an entity containing a named feature",
+          "Passage explicitly states the statistic for the containing entity",
+          "Question includes a census, reporting period, or other measurement date"
+        ],
+        "index": 5,
+        "declared_type": "step",
+        "inferred_type": "step",
+        "accepted": true,
+        "reason": "Applicability depends on what a passage states or omits about the containing entity or feature."
+      },
+      {
+        "step": 10,
+        "experience_type": "task",
+        "trigger": "The question asks for a specific duration or measurement of a named work, program, or recurring media element.",
+        "state_cues": [
+          "Question asks how long a named media feature lasts",
+          "Requested measurement is a duration rather than a date",
+          "The feature is part of a larger work or program"
+        ],
+        "index": 6,
+        "declared_type": "task",
+        "inferred_type": "task",
+        "accepted": true,
+        "reason": "The trigger is a question asking for a named work's specific duration or measurement."
+      },
+      {
+        "step": 15,
+        "experience_type": "task",
+        "trigger": "The question asks for the total number of episodes in a television series without specifying a season.",
+        "state_cues": [
+          "Question asks how many episodes are in a series",
+          "No season is specified",
+          "Passage gives a count for a particular season"
+        ],
+        "index": 7,
+        "declared_type": "task",
+        "inferred_type": "ambiguous",
+        "accepted": false,
+        "reason": "The trigger describes a series-total question, but a state cue requires a passage giving a particular-season count, mixing question-only and observed-result conditions."
+      }
+    ]
+  }
+}

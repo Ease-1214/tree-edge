@@ -112,6 +112,10 @@ def manage_tree_experiences(trainer, tree):
             "reflector/added_task": 0,
             "reflector/added_step": 0,
             "reflector/skip_reason": 3,
+            **{f"reflector/classification_{stat}": 0.0 for stat in (
+                "submitted", "accepted", "rejected", "ambiguous",
+                "failed", "invalid_type_dropped",
+            )},
         },
     )
     interval = int(cfg.utility_update_interval)
@@ -166,6 +170,10 @@ def manage_tree_experiences(trainer, tree):
         )
         metrics["reflector/extracted"] = len(additions)
         metrics["reflector/failed"] = int(not trainer.experience_updater.last_update_succeeded)
+        audit = getattr(trainer.experience_updater, "last_classification_stats", {})
+        for stat in ("submitted", "accepted", "rejected", "ambiguous",
+                     "failed", "invalid_type_dropped"):
+            metrics[f"reflector/classification_{stat}"] = float(audit.get(stat, 0))
         metrics.update(write_new_experiences(memory, additions, step))
     management = trainer.config.env.experience_memory.get("management", {})
     if management.get("eviction_enabled", True):
