@@ -22,7 +22,7 @@ esac
 if [[ ! -f "$SOURCE/.git" && ! -d "$SOURCE/.git" ]]; then
   echo "Missing isolated worktree: $SOURCE" >&2; exit 2
 fi
-if [[ "$(git -C "$SOURCE" branch --show-current)" != "t73-t71replica-r64-8gpu-eval50" ]]; then
+if [[ "$(git -C "$SOURCE" branch --show-current)" != "fix/t73-reflector-type-validation" ]]; then
   echo "Wrong branch; refusing to start" >&2; exit 2
 fi
 # Runtime-only credentials remain in their existing service environment.
@@ -43,8 +43,17 @@ client = ExperienceUpdater(max_new_experiences_per_update=3)
 client.client.close()
 print("T73_REFLECTOR_CLIENT_PREFLIGHT_OK", flush=True)
 PY
-if [[ -e "$RUN_DIR" ]] && [[ -n "$(ls -A "$RUN_DIR")" ]]; then
-  echo "Refusing to overwrite existing run directory: $RUN_DIR" >&2; exit 2
+# A new, isolated run directory is mandatory. Never overwrite live T73.
+ORIGINAL_RUN_DIR="$ROOT/qwen25-3b-r64a128-a40x2-full11015-20261115"
+if [[ "$RUN_DIR" == "$ORIGINAL_RUN_DIR" ]]; then
+  echo "Original run directory protected; specify isolated T73_RUN_DIR" >&2; exit 2
+fi
+if [[ "$T73_SAFE_RESUME" != "1" ||
+      ! -f "$RUN_DIR/checkpoints/global_step_20/tree_state.json" ||
+      ! -f "$RUN_DIR/checkpoints/global_step_20/actor/training_state_rank_0.pt" ||
+      ! -f "$RUN_DIR/checkpoints/global_step_20/actor/training_state_rank_1.pt" ||
+      "$(cat "$RUN_DIR/checkpoints/latest_checkpointed_iteration.txt" 2>/dev/null)" != "20" ]]; then
+  echo "Missing verified isolated Step20 checkpoint; refusing to start" >&2; exit 2
 fi
 export PERF_RUN_DIR="$RUN_DIR" T062_ROOT="$ROOT"
 # Keep Ray AF_UNIX socket paths short while checkpoints remain in RUN_DIR.
@@ -69,7 +78,7 @@ export T72_WANDB_STARTUP_HEARTBEAT=1
 export WANDB_DIR="$RUN_DIR"
 mkdir -p "$WANDB_DIR"
 export WANDB_RUN_ID=${WANDB_RUN_ID:-t73-qwen25-3b-r64a128-a40x2-full11015-20261115}
-export WANDB_RESUME=${WANDB_RESUME:-never}
+export WANDB_RESUME=${WANDB_RESUME:-must}
 export WANDB_RUN_GROUP=t73 WANDB_NAME=${WANDB_NAME:-t73-qwen25-3b-r64a128-a40x2-full11015}
 export WANDB_TAGS=t73,qwen25-3b,r64,a128,two-a40,t71replica,eval50,edge-single-stage-extraction,conditional,natural4,opsd005,sft005
 cd "$SOURCE"
@@ -105,7 +114,7 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   actor_rollout_ref.actor.edge_distillation.path_tier=2 \
   actor_rollout_ref.actor.edge_distillation.normalization=active_kd_tokens \
   actor_rollout_ref.actor.checkpoint.contents='[lora_adapter]' \
-  trainer.save_freq=10 trainer.resume_mode=auto \
+  trainer.save_freq=10 trainer.resume_mode=resume_path trainer.resume_from_path="$RUN_DIR/checkpoints/global_step_20" \
   trainer.val_before_train=False trainer.test_freq=50 \
   data.val_batch_size=128 \
   trainer.project_name=tree-edge-search \

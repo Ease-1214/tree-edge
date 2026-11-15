@@ -1,0 +1,20 @@
+{
+  "count": 2,
+  "accepted": 2,
+  "decisions": [
+    {
+      "index": 1,
+      "declared_type": "task",
+      "inferred_type": "task",
+      "accepted": true,
+      "reason": "The song and requested performer role are identifiable from the question; checking search results is a future action, not a trigger condition."
+    },
+    {
+      "index": 2,
+      "declared_type": "task",
+      "inferred_type": "task",
+      "accepted": true,
+      "reason": "The requested personal attribute and subject can be identified from the question; related works or institutions are contextual clues, not required observations."
+    }
+  ]
+}
