@@ -2445,18 +2445,15 @@ class RayPPOTrainer:
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 tree_enabled = self.config.env.get("tree_experience", {}).get("enable", False)
-                if tree_enabled:
-                    from agent_system.tree.metrics import dashboard_metrics
-                    metrics.update(dashboard_metrics(metrics))
-                # TODO: make a canonical logger that supports various backend
-                if tree_enabled:
-                    import json
-                    with open(Path(self.config.trainer.default_local_dir).parent / "step_metrics.jsonl", "a") as handle:
-                        handle.write(json.dumps(metrics, default=lambda value: float(value))+"\n")
                 wandb_metrics = metrics
                 if tree_enabled and os.environ.get("WANDB_LOG_RAW_METRICS", "0") != "1":
                     from agent_system.tree.metrics import build_clean_wandb_metrics
                     wandb_metrics = build_clean_wandb_metrics(metrics)
+                # TODO: make a canonical logger that supports various backend
+                if tree_enabled:
+                    import json
+                    with open(Path(self.config.trainer.default_local_dir).parent / "step_metrics.jsonl", "a") as handle:
+                        handle.write(json.dumps(wandb_metrics, default=lambda value: float(value))+"\n")
                 logger.log(data=wandb_metrics, step=self.global_steps)
 
                 progress_bar.update(1)
