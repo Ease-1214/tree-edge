@@ -85,6 +85,17 @@ def test_extraction_calls_edge_single_stage_with_existing_bank(monkeypatch):
         )])
 
     updater._completion_with_deadline = completion
+    # Default: single-call mode (ENABLE_EXPERIENCE_TYPE_VALIDATION=0)
+    monkeypatch.setenv("ENABLE_EXPERIENCE_TYPE_VALIDATION", "0")
+    new_single = updater.analyze_failures(
+        edge_search_examples_from_forks([_fork()]), existing
+    )
+    assert len(prompts) == 1
+    assert len(new_single) == 1
+
+    # Optional 2-call validator mode (ENABLE_EXPERIENCE_TYPE_VALIDATION=1)
+    prompts.clear()
+    monkeypatch.setenv("ENABLE_EXPERIENCE_TYPE_VALIDATION", "1")
     new = updater.analyze_failures(
         edge_search_examples_from_forks([_fork()]), existing
     )

@@ -232,3 +232,23 @@ def test_module5_grpo_advantage_decoupled_from_invalid_penalty():
     assert adv["L1"] == 0.0
     assert adv["L2"] == 0.0
     assert adv["L3"] == pytest.approx(-0.5)
+
+
+def test_sft_weight_excludes_invalid_actions_in_rescued_trajectory():
+    state = SearchBranchState("q_rescue", "Question?", ["ans"], "nq")
+    tree = TreeRollout(invalid_action_penalty_coef=0.5)
+    # Turn 1: invalid format action (valid=False)
+    tree.nodes["N1_invalid"] = DecisionNode(
+        "q_rescue", "N1_invalid", None, "", 1, "L", state.clone(), (), "p", "n",
+        action="<think>truncated...", valid=False, done=False,
+    )
+    # Turn 2: valid answer that rescues the trajectory (reward=1.0, valid=True)
+    tree.nodes["N2_valid"] = DecisionNode(
+        "q_rescue", "N2_valid", "N1_invalid", "", 2, "L", state.clone(), (), "p", "n",
+        action="<think>ok</think><answer>ans</answer>", valid=True, done=True, terminal_reward=1.0,
+    )
+    tree.leaves.append(Leaf("q_rescue", "L_rescue", ("N1_invalid", "N2_valid"), 1.0, "nq"))
+    rows = {r["node_id"]: r for r in tree.expanded_rows()}
+    assert rows["N1_invalid"]["sft_weight"] == 0.0
+    assert rows["N2_valid"]["sft_weight"] == 1.0
+

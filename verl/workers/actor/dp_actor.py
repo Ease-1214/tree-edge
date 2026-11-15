@@ -645,6 +645,7 @@ class DataParallelPPOActor(BasePPOActor):
         diagnostic_component = data.meta_info.get("gradient_diagnostic_component")
         gradient_diagnostic_metrics = {}
         if (self._explicit_replica_sync and diagnostic_component is None
+                and os.environ.get("ENABLE_GRADIENT_DIAGNOSTICS", "0") == "1"
                 and int(data.meta_info.get("global_step", -1)) in (1, 50, 100)
                 and data.meta_info.get("gradient_diagnostic_dir")
                 and self.config.get("edge_distillation", {}).get("enable", False)):

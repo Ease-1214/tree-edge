@@ -766,6 +766,9 @@ class ActorRolloutRefWorker(Worker):
         from contextlib import nullcontext
         is_lora = data.meta_info.pop("is_lora", False)
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
+        log_prob_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        non_tensor_keys = ["multi_modal_inputs"] if "multi_modal_inputs" in data.non_tensor_batch else []
+        data = data.select(batch_keys=log_prob_keys, non_tensor_batch_keys=non_tensor_keys, deepcopy=False)
         data = data.to(get_torch_device().current_device())
         # we should always recompute old_log_probs when it is HybridEngine
         data.meta_info["micro_batch_size"] = self.config.rollout.log_prob_micro_batch_size_per_gpu

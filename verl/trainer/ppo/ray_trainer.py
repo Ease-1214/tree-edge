@@ -200,27 +200,19 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: core_algos.AdaptiveKLController, 
 
 def apply_invalid_action_penalty(data: DataProto, invalid_action_penalty_coef=float):
     reward_tensor = data.batch['token_level_scores']
-    if 'step_rewards' in data.batch.keys():
-        step_rewards = data.batch['step_rewards']
-    for i in range(len(data)):
-        data_item = data[i]  # DataProtoItem
-
-        prompt_ids = data_item.batch['prompts']
-
-        prompt_length = prompt_ids.shape[-1]
-
-        valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
-
-        action_valids = data_item.non_tensor_batch['is_action_valid'].astype(np.float32)
-        action_invalids = torch.tensor(1 - action_valids, dtype=torch.float32, device=prompt_ids.device).squeeze(0)
-        # invalid action penalty
-        # assert reward_tensor[i, valid_response_length - 1] != 0.0, f'i={i}'
-        reward_tensor[i, valid_response_length - 1] -= invalid_action_penalty_coef * action_invalids
-
+    action_valids_np = data.non_tensor_batch['is_action_valid'].astype(np.float32)
+    if len(data) > 0:
+        prompt_length = data.batch['prompts'].shape[-1]
+        valid_response_lengths = data.batch['attention_mask'][:, prompt_length:].sum(dim=-1)
+        action_invalids = torch.as_tensor(
+            1.0 - action_valids_np, dtype=torch.float32, device=reward_tensor.device
+        ).reshape(-1)
+        row_indices = torch.arange(len(data), device=reward_tensor.device)
+        col_indices = (valid_response_lengths - 1).clamp(min=0, max=reward_tensor.size(1) - 1)
+        reward_tensor[row_indices, col_indices] -= float(invalid_action_penalty_coef) * action_invalids
         if 'step_rewards' in data.batch.keys():
-            step_rewards[i] -= invalid_action_penalty_coef * action_invalids
-    
-    valid_action_ratio = np.mean(data.non_tensor_batch['is_action_valid'].astype(np.float32)).item()
+            data.batch['step_rewards'] -= float(invalid_action_penalty_coef) * action_invalids
+    valid_action_ratio = np.mean(action_valids_np).item()
     metrics = {'episode/valid_action_ratio': valid_action_ratio}
     return data, metrics
 
@@ -2365,7 +2357,10 @@ class RayPPOTrainer:
                             batch, edge_metrics = self._compute_edge_distillation_weights(batch)
                             metrics.update(edge_metrics)
 
-                    if tree_mode:
+                    if tree_mode and (
+                        self.global_steps == 1
+                        or os.environ.get("ENABLE_TREE_TOKEN_AUDIT", "0") == "1"
+                    ):
                         from agent_system.tree.runner import audit_training_tokens
                         trace_dir = Path(self.config.trainer.default_local_dir).parent / "tree-private"
                         metrics.update(audit_training_tokens(batch, self.traj_collector.last_tree,

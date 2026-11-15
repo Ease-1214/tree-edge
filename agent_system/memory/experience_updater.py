@@ -140,39 +140,46 @@ class ExperienceUpdater:
                 self.last_classification_stats["invalid_type_dropped"] = int(
                     getattr(self, "last_invalid_fork_type_dropped", 0)
                 )
-                # T73 Fork + EDGE generates and classifies in the first API
-                # call. One additional BATCH call independently audits the
-                # actual triggers. Never rewrite or silently relabel output.
+                # By default, run 1 single LLM API call per reflection window.
+                # Set ENABLE_EXPERIENCE_TYPE_VALIDATION=1 to enable the optional
+                # second-pass type validator audit.
+                enable_type_validator = os.environ.get(
+                    "ENABLE_EXPERIENCE_TYPE_VALIDATION", "0"
+                ).strip().lower() in ("1", "true", "yes")
                 if any(t.get("fork_id") for t in failed_trajectories) and raw_experiences:
                     self.last_classification_stats["submitted"] = len(raw_experiences)
-                    try:
-                        raw_experiences, decisions = validate_experience_types(
-                            raw_experiences, self._completion_with_deadline,
-                            model=self.model,
-                            token_limit_param=self.token_limit_param,
-                            max_completion_tokens=self.max_completion_tokens,
+                    if enable_type_validator:
+                        try:
+                            raw_experiences, decisions = validate_experience_types(
+                                raw_experiences, self._completion_with_deadline,
+                                model=self.model,
+                                token_limit_param=self.token_limit_param,
+                                max_completion_tokens=self.max_completion_tokens,
+                            )
+                        except Exception as error:
+                            self.last_classification_stats["failed"] = (
+                                self.last_classification_stats["submitted"]
+                            )
+                            self.last_failure_reason = "classification_validation_failed"
+                            self.last_update_succeeded = False
+                            print("[ExperienceUpdater] classification validation failed: "
+                                  + type(error).__name__, flush=True)
+                            return []  # fail closed; leave the live bank unchanged
+                        self.last_classification_decisions = decisions
+                        self.last_classification_stats["accepted"] = len(raw_experiences)
+                        self.last_classification_stats["rejected"] = sum(
+                            not x["accepted"] for x in decisions
                         )
-                    except Exception as error:
-                        self.last_classification_stats["failed"] = (
-                            self.last_classification_stats["submitted"]
+                        self.last_classification_stats["ambiguous"] = sum(
+                            x["inferred_type"] == "ambiguous" for x in decisions
                         )
-                        self.last_failure_reason = "classification_validation_failed"
-                        self.last_update_succeeded = False
-                        print("[ExperienceUpdater] classification validation failed: "
-                              + type(error).__name__, flush=True)
-                        return []  # fail closed; leave the live bank unchanged
-                    self.last_classification_decisions = decisions
-                    self.last_classification_stats["accepted"] = len(raw_experiences)
-                    self.last_classification_stats["rejected"] = sum(
-                        not x["accepted"] for x in decisions
-                    )
-                    self.last_classification_stats["ambiguous"] = sum(
-                        x["inferred_type"] == "ambiguous" for x in decisions
-                    )
-                    for decision in decisions:
-                        if not decision["accepted"]:
-                            print("[ExperienceUpdater] classification rejected: "
-                                  + json.dumps(decision, ensure_ascii=False), flush=True)
+                        for decision in decisions:
+                            if not decision["accepted"]:
+                                print("[ExperienceUpdater] classification rejected: "
+                                      + json.dumps(decision, ensure_ascii=False), flush=True)
+                    else:
+                        self.last_classification_decisions = []
+                        self.last_classification_stats["accepted"] = len(raw_experiences)
             reassigned = self._reassign_exp_ids(raw_experiences, next_exp_idx)
             self.update_history.append(
                 {
@@ -341,7 +348,16 @@ Return ONLY a JSON array of experience objects.
     # schema, used identically by every method.                           #
     # ------------------------------------------------------------------ #
 
-    SEARCH_TASK_TYPES = ("direct_retrieval", "entity_attribute_lookup", "multi_hop_reasoning", "comparison")
+    SEARCH_TASK_TYPES = (
+        "single_fact",
+        "bridge_entity",
+        "comparison",
+        "temporal_disambiguation",
+        "evidence_verification",
+        "direct_retrieval",
+        "entity_attribute_lookup",
+        "multi_hop_reasoning",
+    )
 
     def _prompt_domain(self, current_experiences: Dict) -> str:
         forced = os.environ.get("EDGE_REFLECTOR_PROMPT", "auto").lower()

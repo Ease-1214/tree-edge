@@ -38,6 +38,26 @@ class EpisodeRewardManager:
 
         reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
 
+        if self.num_examine <= 0 and len(data) > 0:
+            prompt_length = data.batch['prompts'].shape[-1]
+            valid_response_lengths = data.batch['attention_mask'][:, prompt_length:].sum(dim=-1)
+            episode_rewards = np.asarray(data.non_tensor_batch['episode_rewards'], dtype=np.float32)
+            if self.normalize_by_length:
+                episode_lengths = np.asarray(data.non_tensor_batch['episode_lengths'], dtype=np.float32)
+                scores = episode_rewards / np.maximum(episode_lengths, 1.0)
+            else:
+                scores = episode_rewards
+            scores_t = torch.as_tensor(scores, dtype=torch.float32, device=reward_tensor.device)
+            row_indices = torch.arange(len(data), device=reward_tensor.device)
+            col_indices = (valid_response_lengths - 1).clamp(min=0, max=reward_tensor.size(1) - 1)
+            reward_tensor[row_indices, col_indices] = scores_t
+            if return_dict:
+                return {
+                    "reward_tensor": reward_tensor,
+                    "reward_extra_info": {},
+                }
+            return reward_tensor
+
         already_print_data_sources = {}
 
         for i in range(len(data)):
@@ -54,20 +74,7 @@ class EpisodeRewardManager:
             valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
             valid_response_ids = response_ids[:valid_response_length]
 
-            # decode
-            prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
-            response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
-
-            # ground_truth = data_item.non_tensor_batch['reward_model']['ground_truth']
-
             data_source = data_item.non_tensor_batch['data_source']
-
-            extra_info = data_item.non_tensor_batch.get('extra_info', None)
-            multi_modal_inputs = data_item.non_tensor_batch.get('multi_modal_inputs', None)
-            if multi_modal_inputs is not None:
-                pixel_values = multi_modal_inputs['pixel_values']
-                image_grid_thw = multi_modal_inputs['image_grid_thw']
-
 
             episode_rewards = data_item.non_tensor_batch['episode_rewards']
             episode_lengths = data_item.non_tensor_batch['episode_lengths']
@@ -83,6 +90,8 @@ class EpisodeRewardManager:
 
             if already_print_data_sources[data_source] < self.num_examine and np.random.random() < 0.1:
                 already_print_data_sources[data_source] += 1
+                prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=False)
+                response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
                 print(f"[{data_source}][prompt]", prompt_str)
                 print(f"[{data_source}][response]", response_str)
                 print(f"[{data_source}][score]", score)

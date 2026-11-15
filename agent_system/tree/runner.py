@@ -683,7 +683,11 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     if prepacked:
         from agent_system.tree.question_batches import unique_training_representatives
         representatives = unique_training_representatives(rows)
-        all_success_nodes = {r["node_id"] for r in rows if r["reward"] == 1}
+        all_success_nodes = {
+            r["node_id"]
+            for r in rows
+            if r["reward"] == 1 and tree.nodes[r["node_id"]].valid
+        }
         batch = pack_training_rows(
             collector, tree, representatives, success_sft=sft_enabled,
             successful_nodes=all_success_nodes,
@@ -764,7 +768,8 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     root = Path(config.trainer.default_local_dir).parent / "tree-private"
     root.mkdir(parents=True, exist_ok=True)
     start_snapshot = time.perf_counter()
-    torch.save(tree, root / f"tree-step{step}.pt")
+    if os.environ.get("SAVE_TREE_SNAPSHOT", "0") == "1":
+        torch.save(tree, root / f"tree-step{step}.pt")
     tree.metrics["perf/tree_snapshot_seconds"] = time.perf_counter() - start_snapshot
     (root / f"structure-step{step}.json").write_text(
         json.dumps(
@@ -814,14 +819,43 @@ def pack_training_rows(collector, tree, rows, success_sft=False, successful_node
         "rollout_source": [],
     }
     if successful_nodes is None:
-        successful_nodes = {row["node_id"] for row in rows if row["reward"] == 1}
-    sft_prompt_cache = {}
+        successful_nodes = {
+            row["node_id"]
+            for row in rows
+            if row["reward"] == 1 and tree.nodes[row["node_id"]].valid
+        }
+    R = tensors["responses"].size(1)
+    noexp_prompt_cache = {}
+    nodes_needing_noexp = set()
     if success_sft:
-        for node_id in successful_nodes:
-            node = tree.nodes[node_id]
-            sft_prompt_cache[node_id] = collector._tokenize_text_prompts(
-                [node.noexp_prompt_text], "cpu"
+        nodes_needing_noexp.update(successful_nodes)
+    for row in rows:
+        if row["kd_canonical"]:
+            nodes_needing_noexp.add(row["node_id"])
+    changed_nids = []
+    changed_texts = []
+    for node_id in sorted(nodes_needing_noexp):
+        node = tree.nodes[node_id]
+        if node.noexp_prompt_text == node.actual_prompt_text:
+            noexp_prompt_cache[node_id] = dict(
+                input_ids=node.tensors["input_ids"][:-R].unsqueeze(0),
+                attention_mask=node.tensors["attention_mask"][:-R].unsqueeze(0),
             )
+        else:
+            changed_nids.append(node_id)
+            changed_texts.append(node.noexp_prompt_text)
+    if changed_nids:
+        tokenized = collector._tokenize_text_prompts(changed_texts, "cpu")
+        for idx, node_id in enumerate(changed_nids):
+            noexp_prompt_cache[node_id] = dict(
+                input_ids=tokenized["input_ids"][idx : idx + 1],
+                attention_mask=tokenized["attention_mask"][idx : idx + 1],
+            )
+    sft_prompt_cache = {
+        node_id: noexp_prompt_cache[node_id]
+        for node_id in successful_nodes
+        if node_id in noexp_prompt_cache
+    } if success_sft else {}
     success = statistics.mean(leaf.reward for leaf in tree.leaves)
     leaf_map = {leaf.leaf_id: leaf for leaf in tree.leaves}
     kd_student, kd_teacher, sft_student = [], [], []
@@ -853,15 +887,13 @@ def pack_training_rows(collector, tree, rows, success_sft=False, successful_node
         )
         for key, value in values.items():
             fields[key].append(value)
-        R = node.tensors["responses"].numel()
         placeholder = dict(
             input_ids=node.tensors["input_ids"][:-R].unsqueeze(0),
             attention_mask=node.tensors["attention_mask"][:-R].unsqueeze(0),
         )
         if row["kd_canonical"]:
             right = tree.nodes[tree.forks[row["fork_id"]].right_node_id]
-            student = collector._tokenize_text_prompts([node.noexp_prompt_text], "cpu")
-            R = node.tensors["responses"].numel()
+            student = noexp_prompt_cache[node.node_id]
             fields["kd_noexp_prompt_ids"][-1] = student["input_ids"][0].tolist()
             kd_student.append(student)
             kd_teacher.append(
@@ -918,7 +950,12 @@ def pack_training_rows(collector, tree, rows, success_sft=False, successful_node
         tensors[prefix + "_attention_mask"] = masks
         tensors[prefix + "_position_ids"] = compute_position_id_with_mask(masks)
     tensors["sft_weight"] = torch.tensor(
-        [float(row["reward"] == 1) if success_sft else 0.0 for row in rows],
+        [
+            float(row["reward"] == 1 and tree.nodes[row["node_id"]].valid)
+            if success_sft
+            else 0.0
+            for row in rows
+        ],
         dtype=torch.float32,
     )
     tensors["tree_advantage"] = torch.tensor(

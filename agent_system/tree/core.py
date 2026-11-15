@@ -175,7 +175,9 @@ class TreeRollout:
                         reward=leaf.reward,
                         advantage=advantages[leaf.leaf_id],
                         kd_weight=0.0,
-                        sft_weight=float(leaf.reward == 1),
+                        sft_weight=float(
+                            leaf.reward == 1 and self.nodes[node_id].valid
+                        ),
                         kd_canonical=False,
                         is_padding_copy=False,
                     )
