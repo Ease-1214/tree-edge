@@ -1,39 +1,30 @@
-"""T069 prompt and bounded-request regressions."""
+"""T069/T75 prompt and bounded-request regressions."""
 from types import SimpleNamespace
 import time
 import pytest
 from agent_system.memory.experience_updater import ExperienceUpdater
 from agent_system.tree.core import trajectory_reflector_examples
+from agent_system.tree.edge_fork_adapter import edge_search_examples_from_forks
 from test_tree_method import example
 
 def updater():
     result=object.__new__(ExperienceUpdater)
-    result.max_new_experiences_per_update=3
+    result.max_new_experiences_per_update=5
+    result.last_update_succeeded=False
+    result.last_failure_reason=None
+    result.last_classification_stats={}
+    result.last_classification_decisions=[]
     return result
 
-def test_trajectory_prompt_allows_uncertainty_and_no_rewording():
-    tree=example()
-    experiences=trajectory_reflector_examples(tree,k=10,seed=5)
-    prompt=updater()._build_trajectory_pair_prompt(experiences,{},1)
-    # v3 is intentionally unrestricted by the former 60k-character cap.
-    assert "the final outcome alone never proves" in prompt
-    assert "0 is okay" in prompt
-    assert "EXPERIENCE TYPE = WHEN IT IS RETRIEVED AND USED" in prompt
-    assert "treat it as unknown, not absent" in prompt
-    assert "COMPLETE EXAMPLES" in prompt
-
-def test_experience_ids_avoid_repeated_body_and_budget_scales_observations():
-    turn=dict(depth=1,task_experience_ids=["task_1"],step_experience_ids=[],
-        experience_ids=["task_1"],action="<search>entity</search>",observation="evidence "*500)
-    item=dict(task="a question",failed_turns=[turn]*4,success_turns=[turn]*4,
-        divergence_depth=1,leaf_success_rate=.1,n_leaves=10)
-    writer=updater()
-    prompt=writer._build_trajectory_pair_prompt([item]*10,
-        {"task_experiences":[dict(experience_id="task_1",trigger="condition",recommended_action="unique body")]},1)
-    assert len(prompt)<=60000
-    assert prompt.count("unique body")==1
-    assert "[TRUNCATED]" in prompt
-    assert 128<=writer.last_observation_char_limit<=1200
+def test_search_prompt_includes_anti_duplication_and_resolved_experience():
+    tree=example((1,),(0,))
+    tree.bank_snapshot={"task_experiences":[{"experience_id":"e","trigger":"when entity unknown","recommended_action":"search entity"}]}
+    forks=trajectory_reflector_examples(tree,k=10,seed=5)
+    edge_examples=edge_search_examples_from_forks(forks)
+    prompt=updater()._build_search_analysis_prompt(edge_examples,tree.bank_snapshot,1)
+    assert "STRICT ANTI-DUPLICATION" in prompt
+    assert "Generate 0-5 experiences" in prompt
+    assert "when entity unknown" in prompt
 
 def test_deadline_returns_without_waiting_for_slow_network():
     class FakeClient:
@@ -56,16 +47,7 @@ def test_deadline_returns_without_waiting_for_slow_network():
 def test_prompt_failure_is_reported_without_network_call():
     writer=updater()
     writer._prompt_domain=lambda _: "search"
-    result=writer.analyze_failures([dict(mode="trajectory_pair",task="x"*70000)],{})
+    result=writer.analyze_failures([dict(task="x"*70000)],{})
     assert result==[]
     assert not writer.last_update_succeeded
     assert writer.last_failure_reason=="prompt_ValueError"
-
-
-def test_removed_injected_experience_still_has_catalog_definition():
-    turn=dict(depth=2,task_experience_ids=[],step_experience_ids=["removed_1"],
-        experience_ids=["removed_1"],step_experiences=["specific evidence condition and action"],
-        action="<answer>value</answer>",observation="")
-    prompt=updater()._build_trajectory_pair_prompt([dict(task="question",failed_turns=[turn])],{},1)
-    assert "removed_1; step; no longer in current bank" in prompt
-    assert "specific evidence condition and action" in prompt

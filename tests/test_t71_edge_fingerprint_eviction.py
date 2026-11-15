@@ -111,7 +111,55 @@ def test_utility_window_flattens_all_forks_and_ema_zero_observation():
     assert updated[0]["consecutive_negative_windows"]==1
     assert e.merge_window(bank,step=10,beta=0.1,management_interval_steps=5)==[]
     assert abs(bank["task_experiences"][0]["utility"]-(-1/30))<1e-8
+    # Unobserved and zero-delta windows preserve the negative streak; only delta > 0 resets it.
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"]==1
+    e.record({("task_000001","q3"):0.0})
+    e.merge_window(bank,step=15,beta=0.1,management_interval_steps=5)
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"]==1
+    e.record({("task_000001","q4"):-1.0})
+    e.merge_window(bank,step=20,beta=0.1,management_interval_steps=5)
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"]==2
+    e.record({("task_000001","q5"):1.0})
+    e.merge_window(bank,step=25,beta=0.1,management_interval_steps=5)
     assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"]==0
+
+
+def test_t75_vector_dedup_on_upsert_in_embedding_mode(monkeypatch):
+    import numpy as np
+    m = ExperienceMemory(load_initial_experiences=False, retrieval_mode="embedding")
+    base_pos = _entry("step_000001", "Stop searching when snippet answers question", utility=0.25, retrieval_count=10, created=5)
+    base_neg = _entry("step_000002", "Refine query when results are ambiguous", utility=-0.15, retrieval_count=8, created=5)
+    m.experiences["step_experiences"] = [base_pos, base_neg]
+    m._normalize_all_experience_meta()
+
+    def fake_encode(texts, normalize_embeddings=True):
+        out = []
+        for t in texts:
+            if "Stop searching" in t or "Answer immediately" in t:
+                out.append([0.98, 0.198997])
+            elif "Refine query" in t or "Add qualifier" in t:
+                out.append([0.1, 0.994987])
+            else:
+                out.append([-1.0, 0.0])
+        return np.asarray(out, dtype=np.float32)
+
+    monkeypatch.setattr(m, "_encode_texts", fake_encode)
+
+    # 1. Paraphrase of positive-utility experience (sim >= 0.85): keep old text, do not add new
+    dup_pos = _entry(None, "Answer immediately once snippet states the answer")
+    dup_pos["principle"] = "New principle that should not overwrite positive experience"
+    assert m.upsert_experience_groups(step_experiences=[dup_pos]) == 0
+    assert len(m.experiences["step_experiences"]) == 2
+    assert m.experiences["step_experiences"][0]["principle"] == "Follow exact relation from results"
+
+    # 2. Paraphrase of negative-utility experience (sim >= 0.85): update old text in-place, keep ID & utility
+    dup_neg = _entry(None, "Add qualifier when results are ambiguous")
+    dup_neg["principle"] = "Improved principle for negative experience"
+    assert m.upsert_experience_groups(step_experiences=[dup_neg]) == 0
+    assert len(m.experiences["step_experiences"]) == 2
+    assert m.experiences["step_experiences"][1]["experience_id"] == "step_000002"
+    assert m.experiences["step_experiences"][1]["principle"] == "Improved principle for negative experience"
+    assert m.experiences["step_experiences"][1]["utility"] == -0.15
 
 
 def test_fork_credits_keep_multiple_forks_from_same_question():

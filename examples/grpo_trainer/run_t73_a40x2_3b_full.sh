@@ -22,8 +22,9 @@ esac
 if [[ ! -f "$SOURCE/.git" && ! -d "$SOURCE/.git" ]]; then
   echo "Missing isolated worktree: $SOURCE" >&2; exit 2
 fi
-if [[ "$(git -C "$SOURCE" branch --show-current)" != "fix/t73-reflector-type-validation" ]]; then
-  echo "Wrong branch; refusing to start" >&2; exit 2
+CURRENT_BRANCH="$(git -C "$SOURCE" branch --show-current)"
+if [[ "$CURRENT_BRANCH" != "t75" && "$CURRENT_BRANCH" != "fix/t73-reflector-type-validation" ]]; then
+  echo "Wrong branch ($CURRENT_BRANCH); refusing to start" >&2; exit 2
 fi
 # Runtime-only credentials remain in their existing service environment.
 source "$HOME/.edge_reflector.env"
@@ -39,7 +40,7 @@ export EXPERIENCE_UPDATE_MODEL=gpt-6.1-sol
 PYTHONPATH="$SOURCE${PYTHONPATH:+:$PYTHONPATH}" \
   /home/zehao/.conda/envs/tree-edge/bin/python - <<'PY'
 from agent_system.memory.experience_updater import ExperienceUpdater
-client = ExperienceUpdater(max_new_experiences_per_update=3)
+client = ExperienceUpdater(max_new_experiences_per_update=5)
 client.client.close()
 print("T73_REFLECTOR_CLIENT_PREFLIGHT_OK", flush=True)
 PY
@@ -86,19 +87,23 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   actor_rollout_ref.actor.optim.lr=2e-5 \
   actor_rollout_ref.actor.optim.lr_warmup_steps=5 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
+  actor_rollout_ref.actor.invalid_action_penalty_coef=0.5 \
   env.rollout.n=1 \
   env.tree_experience.enable=True \
   env.tree_experience.conditional_natural.enable=True \
   env.tree_experience.conditional_natural.natural_rollouts=4 \
-  env.tree_experience.task_top_k=4 \
-  env.tree_experience.step_top_k=6 \
-  env.experience_memory.top_k=6 \
-  env.experience_memory.task_specific_top_k=4 \
+  env.tree_experience.task_top_k=12 \
+  env.tree_experience.step_top_k=12 \
+  +env.tree_experience.semantic_candidate_k=12 \
+  env.experience_memory.top_k=12 \
+  env.experience_memory.task_specific_top_k=12 \
+  env.experience_memory.similarity_threshold=0.4 \
+  env.experience_memory.max_new_experiences=5 \
   env.experience_memory.management.retrieval_alpha=0.5 \
   env.experience_memory.management.retrieval_ucb_c=0.5 \
   env.tree_experience.utility_ema_beta=0.1 \
   env.tree_experience.utility_update_interval=5 \
-  env.experience_memory.management.eviction_utility_threshold=-0.01 \
+  env.experience_memory.management.eviction_utility_threshold=-0.05 \
   env.experience_memory.management.eviction_min_exposures=20 \
   env.experience_memory.management.eviction_negative_windows=2 \
   env.experience_memory.management.eviction_protect_recent_steps=0 \

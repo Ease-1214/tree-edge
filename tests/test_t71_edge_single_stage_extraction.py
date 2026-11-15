@@ -72,24 +72,29 @@ def test_extraction_calls_edge_single_stage_with_existing_bank(monkeypatch):
         "source_examples": [1],
     }]
     prompts = []
+    replies = [
+        output,
+        [{"index": 1, "inferred_type": "step", "reason": "Requires retrieved passage"}],
+    ]
 
     def completion(args):
         prompts.append(args["messages"][0]["content"])
+        reply = replies[min(len(prompts) - 1, len(replies) - 1)]
         return SimpleNamespace(choices=[SimpleNamespace(
-            message=SimpleNamespace(content=json.dumps(output))
+            message=SimpleNamespace(content=json.dumps(reply))
         )])
 
     updater._completion_with_deadline = completion
     new = updater.analyze_failures(
         edge_search_examples_from_forks([_fork()]), existing
     )
-    assert len(prompts) == 1
+    assert len(prompts) == 2
     prompt = prompts[0]
     assert "EXISTING EXPERIENCES:" in prompt
     assert "step_000001" in prompt
     assert "Successful trajectory:" in prompt
     assert "Failed trajectory:" in prompt
-    assert "Generate 1-3 experiences" in prompt
+    assert "Generate 0-3 experiences" in prompt
     assert "NOVELTY AGAINST THE EXISTING BANK" not in prompt
     assert "STAGE_ONE_REFLECTIONS" not in prompt
     assert len(new) == 1

@@ -14,6 +14,12 @@
 # limitations under the License.
 
 from .memory import SimpleMemory, SearchMemory
-from .retrieval_memory import RetrievalMemory
+try:
+    from .retrieval_memory import RetrievalMemory
+except ImportError:
+    RetrievalMemory = None
 from .experience_memory import ExperienceMemory
-from .experience_updater import ExperienceUpdater
+try:
+    from .experience_updater import ExperienceUpdater
+except ImportError:
+    ExperienceUpdater = None

@@ -155,13 +155,13 @@ def manage_tree_experiences(trainer, tree):
             trainer.experience_updater = ExperienceUpdater(
                 base_url=params.experience_update_base_url,
                 model=params.experience_update_model,
-                max_new_experiences_per_update=int(params.get("max_new_experiences", 3)),
+                max_new_experiences_per_update=int(params.get("max_new_experiences", 5)),
                 max_completion_tokens=int(params.max_completion_tokens),
                 token_limit_param=params.token_limit_param,
             )
         from agent_system.tree.edge_fork_adapter import edge_search_examples_from_forks
-        # Fork eligibility and random selection above are unchanged. Everything
-        # after selection uses the EDGE single-call extraction/upsert path.
+        # Fork eligibility and selection above produce stratified depth-bucketed
+        # harmful forks (delta < 0). Extraction uses a single-call prompt.
         edge_examples = edge_search_examples_from_forks(contrasts)
         metrics["reflector/selector_llm_used"] = 0.0
         additions = trainer.experience_updater.analyze_failures(
@@ -177,16 +177,15 @@ def manage_tree_experiences(trainer, tree):
         metrics.update(write_new_experiences(memory, additions, step))
     management = trainer.config.env.experience_memory.get("management", {})
     if management.get("eviction_enabled", True):
-        # EDGE's hard-eviction AND conditions and UCB capacity management.
-        # T71 disables age protection via its isolated launch override.
+        # Single-track conservative eviction + UCB capacity management.
         eviction = memory.evict_excess_experiences(
             step,
             max_task_experiences=int(management.get("eviction_max_task_experiences", 200)),
             max_step_experiences=int(management.get("eviction_max_step_experiences", 200)),
             protect_recent_steps=int(management.get("eviction_protect_recent_steps", cfg.protect_recent_steps)),
             score_c=float(management.get("eviction_score_c", 1.0)),
-            min_exposures=int(management.get("eviction_min_exposures", 5)),
-            utility_threshold=float(management.get("eviction_utility_threshold", -0.25)),
+            min_exposures=int(management.get("eviction_min_exposures", 20)),
+            utility_threshold=float(management.get("eviction_utility_threshold", -0.05)),
             negative_windows=int(management.get("eviction_negative_windows", 2)),
         )
     else:

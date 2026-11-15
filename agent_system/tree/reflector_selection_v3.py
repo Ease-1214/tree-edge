@@ -46,26 +46,28 @@ def _downstream_experience_count(tree, leaf, fork_depth):
 
 
 def _paired_leaves(tree, audit, leaves):
-    """Find one successful/failed pair whose later path has minimal confounds."""
+    """Find one successful Left / failed Right pair whose later path has minimal confounds."""
     left_node, right_node = audit["left_node_id"], audit["right_node_id"]
     left = [leaves[k] for k in audit["left_leaf_ids"] if k in leaves]
     right = [leaves[k] for k in audit["right_leaf_ids"] if k in leaves]
     if not left or not right:
         return None
-    lrate = statistics.mean(x.reward for x in left)
-    rrate = statistics.mean(x.reward for x in right)
-    # Positive and negative interventions are equally useful.
-    if lrate == rrate:
+    lrate = float(audit.get("left_mean", statistics.mean(x.reward for x in left)))
+    rrate = float(audit.get("right_mean", statistics.mean(x.reward for x in right)))
+    # Only extract new experiences when the without-experience Left branch
+    # succeeded and the with-experience Right branch failed (delta < 0).
+    if rrate >= lrate:
         return None
-    good, bad = (left, right) if lrate > rrate else (right, left)
-    wins = [x for x in good if x.reward == 1]
-    losses = [x for x in bad if x.reward == 0]
+    if max(audit["left_rewards"]) != 1 or max(audit["right_rewards"]) != 0:
+        return None
+    wins = [x for x in left if x.reward == 1]
+    losses = [x for x in right if x.reward == 0]
     if not wins or not losses:
         return None
     depth = tree.nodes[left_node].depth
     pairs = [(w, l) for w in wins for l in losses]
-    # The root intervention (T) is an intended difference; only count
-    # *subsequent* extra interventions as possible confounders.
+    # Within the chosen fork, prefer the leaf pair with minimal subsequent
+    # experience injections so the trajectory contrast stays clean.
     pairs.sort(key=lambda pair: (
         _downstream_experience_count(tree, pair[0], depth)
         + _downstream_experience_count(tree, pair[1], depth),
@@ -77,16 +79,14 @@ def _paired_leaves(tree, audit, leaves):
 
 
 def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling="ranked"):
-    """Select at most k distinct questions with informative branch contrasts.
+    """Select distinct-question harmful forks (delta < 0) via stratified depth bucketing.
 
-    Strong forks: one subtree has no success, the other has >=1 success.
-    Weaker forks with unequal mean outcomes are fallbacks.
-    A small root representation preference prevents many internal forks
-    crowding out potential multi-turn task strategies. It does NOT require
-    the model to produce T experiences.
+    Eligible forks must have delta = rrate - lrate < 0 with a successful Left
+    leaf and failed Right subtree. Candidates are deduplicated per question and
+    stratified across three depth buckets (depth == 1, depth == 2, depth >= 3),
+    up to 4 per bucket, without padding from delta >= 0 forks.
     """
     if zero_success_quota:
-        # All-failed questions cannot provide the requested successful/failure pair.
         raise ValueError("v3 fork contrast does not support zero-success-only cases")
     if sampling not in ("ranked", "random"):
         raise ValueError(f"Unknown fork sampling mode: {sampling}")
@@ -96,7 +96,7 @@ def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling
     rates_by_uid = defaultdict(list)
     for leaf in tree.leaves:
         rates_by_uid[leaf.uid].append(leaf.reward)
-    candidates = []
+    raw_candidates = []
     for audit in tree.audits:
         lnode = tree.nodes[audit["left_node_id"]]
         rnode = tree.nodes[audit["right_node_id"]]
@@ -109,111 +109,92 @@ def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling
         if pair is None:
             continue
         (success, failure), lrate, rrate = pair
-        strict = max(audit["left_rewards"]) != max(audit["right_rewards"])
-        diff = abs(lrate - rrate)
-        # Subtree score difference is evidence of a useful contrast, not an
-        # estimate of the causal effect of the experience.
+        strict = True
+        diff = lrate - rrate
+        action_family = "/".join(sorted([
+            normalize_action(lnode.action)[0],
+            normalize_action(rnode.action)[0],
+        ]))
+        # Rank within each depth bucket by search/search preference, magnitude
+        # of harmful delta (lrate - rrate), and action distinction. Do NOT
+        # penalize earlier depths for having more downstream turns.
         score = (
-            int(strict), round(diff, 5), round(difference, 5),
-            -(_downstream_experience_count(tree, success, lnode.depth)
-              + _downstream_experience_count(tree, failure, lnode.depth)),
-            -len(success.node_ids) - len(failure.node_ids),
+            int(action_family == "search/search"),
+            round(diff, 5),
+            round(difference, 5),
             rng.random(),
         )
-        candidates.append(dict(
+        raw_candidates.append(dict(
             score=score, uid=lnode.uid, audit=audit,
             action_distinction=difference,
-            action_family="/".join(sorted([
-                normalize_action(lnode.action)[0],
-                normalize_action(rnode.action)[0],
-            ])),
+            action_family=action_family,
             success=success, failure=failure, root=lnode.depth == 1,
             lrate=lrate, rrate=rrate, strict=strict,
             fork_depth=lnode.depth, left=lnode, right=rnode,
         ))
 
-    roots = sorted((c for c in candidates if c["root"]),
-                   key=lambda c: c["score"], reverse=True)
-    selected = []
-    seen = set()
+    # Deduplicate by question (keeping the highest-scoring fork per question)
+    raw_candidates.sort(key=lambda c: c["score"], reverse=True)
+    deduped = []
+    seen_uids = set()
     seen_questions = set()
-
-    def take(c):
+    for c in raw_candidates:
         question_key = (
             c["left"].state_before.data_source,
             c["left"].state_before.question.strip().casefold(),
         )
-        if (c["uid"] in seen or question_key in seen_questions
-                or len(selected) >= k):
-            return
-        seen.add(c["uid"])
+        if c["uid"] in seen_uids or question_key in seen_questions:
+            continue
+        seen_uids.add(c["uid"])
         seen_questions.add(question_key)
-        selected.append(c)
+        deduped.append(c)
 
-    # Reserve visibility for early planning without forcing a quota of T
-    # experiences. Then select by informativeness + diversity, so dozens of
-    # near-identical root queries cannot crowd out all internal decisions.
-    root_preference = 0 if sampling == "random" else min(k, 2)
-    planning_roots = [
-        c for c in roots if c["action_family"] == "search/search"
-    ]
-    for c in (planning_roots or roots)[:root_preference]:
-        take(c)
+    # Stratified depth bucketing: Bucket 1 (depth==1), Bucket 2 (depth==2), Bucket 3 (depth>=3)
+    buckets = {1: [], 2: [], 3: []}
+    for c in deduped:
+        b_idx = 1 if c["fork_depth"] == 1 else (2 if c["fork_depth"] == 2 else 3)
+        buckets[b_idx].append(c)
+    for b_idx in (1, 2, 3):
+        buckets[b_idx].sort(key=lambda c: c["score"], reverse=True)
 
-    while len(selected) < k:
-        remaining = [
-            c for c in candidates
-            if c["uid"] not in seen
-            and (
-                c["left"].state_before.data_source,
-                c["left"].state_before.question.strip().casefold(),
-            ) not in seen_questions
-        ]
-        if not remaining:
-            break
+    per_bucket = 4
+    selected = []
+    for round_idx in range(per_bucket):
+        for b_idx in (1, 2, 3):
+            if round_idx < len(buckets[b_idx]) and len(selected) < k:
+                selected.append(buckets[b_idx][round_idx])
+    if len(selected) < k:
+        selected_ids = {c["audit"]["fork_id"] for c in selected}
+        for c in deduped:
+            if len(selected) >= k:
+                break
+            if c["audit"]["fork_id"] not in selected_ids:
+                selected.append(c)
+                selected_ids.add(c["audit"]["fork_id"])
 
-        def diverse_score(c):
-            depth_count = sum(x["root"] == c["root"] for x in selected)
-            family_count = sum(
-                x["action_family"] == c["action_family"] for x in selected
-            )
-            left = c["audit"]["left_rewards"]
-            right = c["audit"]["right_rewards"]
-            diff = abs(c["lrate"] - c["rrate"])
-            confounds = (
-                _downstream_experience_count(tree, c["success"], c["fork_depth"])
-                + _downstream_experience_count(tree, c["failure"], c["fork_depth"])
-            )
-            # Previous ranking selected mostly "guess an answer vs search",
-            # which yields generic already-banked "do not guess" advice.
-            # Prefer differences in search plans and evidence interpretation,
-            # while retaining a minority of answer/search contrasts.
-            strategy_bonus = {
-                "search/search": 2.0,
-                "answer/answer": 0.6,
-                "answer/search": 0.15,
-            }.get(c["action_family"], 0.0)
-            return (
-                2 * int(c["strict"])
-                + 1.4 * diff
-                + 0.7 * c["action_distinction"]
-                + strategy_bonus
-                - 0.38 * depth_count
-                - 0.52 * family_count
-                - 0.12 * confounds,
-                c["score"],
-            )
-        if sampling == "random":
-            # Uniformly pick eligible forks after the SAME validity filters.
-            # Still keep distinct questions, as in the ranked implementation.
-            remaining.sort(key=lambda c: c["audit"]["fork_id"])
-            take(rng.choice(remaining))
-        else:
-            take(max(remaining, key=diverse_score))
     result = []
     for c in selected:
         audit, left, right = c["audit"], c["left"], c["right"]
         common_state = left.state_before
+        task_ids = list((common_state.task_memory or {}).get("experience_ids", []) or [])
+        common_task_exps = [
+            {
+                "experience_id": eid,
+                "trigger": lookup[eid].get("trigger") or lookup[eid].get("when_to_apply") or lookup[eid].get("title") or "",
+                "recommended_action": lookup[eid].get("recommended_action") or lookup[eid].get("principle") or "",
+                "avoid_action": lookup[eid].get("avoid_action") or "",
+            }
+            for eid in task_ids if eid in lookup
+        ] if c["fork_depth"] > 1 else []
+        added_exps = [
+            {
+                "experience_id": eid,
+                "trigger": lookup[eid].get("trigger") or lookup[eid].get("when_to_apply") or lookup[eid].get("title") or "",
+                "recommended_action": lookup[eid].get("recommended_action") or lookup[eid].get("principle") or "",
+                "avoid_action": lookup[eid].get("avoid_action") or "",
+            }
+            for eid in right.new_experience_ids if eid in lookup
+        ]
         result.append({
             "mode": "trajectory_pair",
             "reflector_version": "v3",
@@ -222,9 +203,11 @@ def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling
             "fork_id": audit["fork_id"],
             "fork_depth": c["fork_depth"],
             "divergence_depth": c["fork_depth"],
-            "fork_tier": "strict" if c["strict"] else "relaxed",
+            "fork_tier": "strict",
             "leaf_success_rate": statistics.mean(rates_by_uid[c["uid"]]),
             "n_leaves": len(rates_by_uid[c["uid"]]),
+            "common_task_experience": common_task_exps,
+            "added_experiences": added_exps,
             "common_search_history": list(common_state.history),
             "fork_observation": common_state.last_observation,
             "left_action": left.action,

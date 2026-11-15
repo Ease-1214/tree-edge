@@ -44,17 +44,20 @@ the advice, and do not use any source Fork depth or reward.
 Each experience has an author's declared type. Independently infer:
 - task: its actual trigger can be recognized from the ORIGINAL QUESTION ALONE.
 - step: recognizing its actual trigger REQUIRES an observation, search result,
-  established intermediate answer, search history, or already-completed action.
-- ambiguous: mixed, contradictory, or underspecified conditions that cannot
-  be classified reliably WITHOUT rewriting the experience.
+  established intermediate answer, search history, or already-completed action
+  (including triggers that combine a question pattern with a search-result
+  condition, e.g., "A question asks X and search results mention Y" — that is
+  a valid STEP experience, NOT ambiguous).
+- ambiguous: contradictory, empty, or non-actionable conditions that cannot
+  be used reliably at either stage.
 
 CRITICAL RULES:
-1. Evaluate TRIGGER and STATE_CUES together as applicability conditions.
+1. Evaluate TRIGGER, STATE_CUES, and RETRIEVAL_TEXT together as applicability conditions.
 2. A task strategy may tell the agent to check future search results; an
    action mentioning results is NOT sufficient to classify it as step.
-3. If the trigger says results already mention people, conflicting dates,
-   missing information, etc., that is a STEP condition, even if its action
-   includes an initial search instruction.
+3. If the trigger, state_cues, or retrieval_text say results already mention
+   people, conflicting dates, missing information, etc., that is a STEP
+   condition, even if its action includes an initial search instruction.
 4. Do NOT infer type from multi-hop reasoning, source Fork depth, whether
    it was successful, or the author's declared label.
 5. Do NOT imagine an improved trigger: classify what is actually supplied.
@@ -77,8 +80,9 @@ def validate_experience_types(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """One batch API request. Invalid/incomplete responses raise, fail-closed.
 
-    Returns accepted original objects and per-item classification decisions.
-    No metadata from LLM responses is written back into experience content.
+    Returns accepted objects (with experience_type aligned to inferred_type
+    when unambiguous task/step) and per-item classification decisions.
+    Ambiguous items are rejected.
     """
     if not experiences:
         return [], []
@@ -94,6 +98,7 @@ def validate_experience_types(
             "declared_type": declared,
             "trigger": item.get("trigger", ""),
             "state_cues": item.get("state_cues", []),
+            "retrieval_text": item.get("retrieval_text", ""),
             "recommended_action": item.get("recommended_action", ""),
             "avoid_action": item.get("avoid_action", ""),
         })
@@ -126,14 +131,21 @@ def validate_experience_types(
             raise ValueError("Classification response inferred_type is invalid")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("Classification response is missing rationale")
-        matches = inferred == item["experience_type"]
+        is_valid = inferred in ("task", "step")
+        relabeled = is_valid and inferred != item["experience_type"]
         decisions.append({
             "index": index,
             "declared_type": item["experience_type"],
             "inferred_type": inferred,
-            "accepted": matches,
+            "accepted": is_valid,
+            "relabeled": relabeled,
             "reason": reason.strip()[:500],
         })
-        if matches:
-            accepted.append(item)
+        if is_valid:
+            if relabeled:
+                updated = dict(item)
+                updated["experience_type"] = inferred
+                accepted.append(updated)
+            else:
+                accepted.append(item)
     return accepted, decisions

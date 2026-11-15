@@ -200,7 +200,7 @@ def test_distinct_question_evidence_and_recovery():
     json.dumps(e.statistics("missing"), allow_nan=False)
 
 
-def test_negative_window_continuity_and_unobserved_reset():
+def test_negative_window_continuity_and_unobserved_preservation():
     e = QuestionEvidence()
     bank = {"task_experiences": [
         {"experience_id": "e", "utility": 0.0, "created_at_step": 0}
@@ -208,13 +208,16 @@ def test_negative_window_continuity_and_unobserved_reset():
     e.record({("e", "q5"): -1})
     e.merge_window(bank, 5)
     assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 1
-    e.merge_window(bank, 10)  # no evidence, so the streak cannot continue
-    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 0
+    e.merge_window(bank, 10)  # unobserved window preserves negative streak
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 1
     e.record({("e", "q15"): -1})
     e.merge_window(bank, 15)
-    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 1
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 2
     e.record({("e", "q20"): 0})
-    e.merge_window(bank, 20)
+    e.merge_window(bank, 20)  # zero-gain window also preserves negative streak
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 2
+    e.record({("e", "q25"): 1})
+    e.merge_window(bank, 25)  # positive-gain window resets streak to 0
     assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 0
 
 

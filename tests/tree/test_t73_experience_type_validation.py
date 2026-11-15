@@ -67,18 +67,21 @@ def classify(accepted):
     return completion
 
 
-def test_batch_semantic_validation_accepts_and_rejects_without_rewriting():
+def test_batch_semantic_validation_accepts_and_relabels_unambiguous_types():
     items = [MISMATCHED, CORRECT_TASK, CORRECT_STEP, AMBIGUOUS]
     kept, decisions = validate_experience_types(
         items, classify(["step", "task", "step", "ambiguous"]), model="fake"
     )
-    assert kept == [CORRECT_TASK, CORRECT_STEP]
-    assert kept[0] is CORRECT_TASK
-    assert [x["accepted"] for x in decisions] == [False, True, True, False]
+    assert len(kept) == 3
+    assert kept[0]["experience_type"] == "step"
+    assert kept[1] is CORRECT_TASK
+    assert kept[2] is CORRECT_STEP
+    assert [x["accepted"] for x in decisions] == [True, True, True, False]
+    assert [x["relabeled"] for x in decisions] == [True, False, False, False]
     assert [x["inferred_type"] for x in decisions] == [
         "step", "task", "step", "ambiguous"
     ]
-    assert MISMATCHED["experience_type"] == "task"  # never silently relabel
+    assert MISMATCHED["experience_type"] == "task"  # input dict not mutated in-place
 
 
 @pytest.mark.parametrize("bad_output", [
@@ -96,9 +99,18 @@ def test_malformed_or_partial_validator_response_fails_closed(bad_output):
 
 
 def make_updater(responses):
-    updater = ExperienceUpdater(
-        api_key="offline", base_url="http://127.0.0.1:1/v1", model="offline"
-    )
+    updater = object.__new__(ExperienceUpdater)
+    updater.model = "offline"
+    updater.max_completion_tokens = 2048
+    updater.max_new_experiences_per_update = 5
+    updater.token_limit_param = "max_tokens"
+    updater._audit_request_count = 0
+    updater.update_history = []
+    updater.last_update_succeeded = False
+    updater.last_failure_reason = None
+    updater.last_classification_stats = {}
+    updater.last_classification_decisions = []
+    updater.client = SimpleNamespace(api_key="offline")
     updater._prompt_domain = lambda *_: "search"
     updater._build_search_analysis_prompt = lambda *_: "OFFLINE_GENERATION_PROMPT"
     updater._next_exp_index = lambda *_: 25
@@ -124,25 +136,28 @@ FORK = [{
 }]
 
 
-def test_updater_calls_one_validator_and_skips_misclassified_item():
-    generated = [dict(MISMATCHED), dict(CORRECT_TASK)]
+def test_updater_calls_one_validator_and_relabels_mismatched_while_dropping_ambiguous():
+    generated = [dict(MISMATCHED), dict(CORRECT_TASK), dict(AMBIGUOUS)]
     result = [
         {"index": 1, "inferred_type": "step", "reason": "Requires actual results"},
         {"index": 2, "inferred_type": "task", "reason": "Only question needed"},
+        {"index": 3, "inferred_type": "ambiguous", "reason": "Mixed condition"},
     ]
     updater, calls = make_updater([generated, result])
     kept = updater.analyze_failures(FORK, {"task_experiences": [], "step_experiences": []})
     assert len(calls) == 2
     assert "before a search" in calls[0]["messages"][0]["content"]
     assert "EXPERIENCES:" in calls[1]["messages"][0]["content"]
-    assert len(kept) == 1
-    assert kept[0]["experience_type"] == "task"
+    assert len(kept) == 2
+    assert kept[0]["experience_type"] == "step"
     assert kept[0]["experience_id"] == "exp_000025"
+    assert kept[1]["experience_type"] == "task"
+    assert kept[1]["experience_id"] == "exp_000026"
     assert kept[0]["evidence"]["source_traj_uids"] == FORK[0]["source_leaf_ids"]
     assert updater.last_update_succeeded
     assert updater.last_classification_stats == {
-        "submitted": 2, "accepted": 1, "rejected": 1,
-        "ambiguous": 0, "failed": 0, "invalid_type_dropped": 0,
+        "submitted": 3, "accepted": 2, "rejected": 1,
+        "ambiguous": 1, "failed": 0, "invalid_type_dropped": 0,
     }
 
 
@@ -168,5 +183,5 @@ def test_missing_type_rejected_instead_of_inferred_from_fork_depth():
 
 def test_prompt_definitions_are_consistent_and_not_depth_based():
     assert "original question ALONE" in CLASSIFICATION_GUIDANCE
-    assert "TRIGGER and STATE_CUES" in VALIDATION_INSTRUCTION
+    assert "TRIGGER, STATE_CUES, and RETRIEVAL_TEXT" in VALIDATION_INSTRUCTION
     assert "Fork depth" in CLASSIFICATION_GUIDANCE

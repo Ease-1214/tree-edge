@@ -436,12 +436,47 @@ def _choose_single_fork_experience(payload, pool_name, candidate_limit):
     return choice
 
 
+def build_step_retrieval_query(state, max_steps=4):
+    """Build a concise state summary for step-level experience retrieval.
+
+    Instead of passing thousands of characters of raw Wikipedia passages that
+    dilute semantic embeddings, summarize the question, current search step,
+    previous search queries, and condensed latest observation state.
+    """
+    prev_queries = []
+    for action, _ in (state.history or []):
+        m = re.findall(r"<search>(.*?)</search>", str(action or ""), flags=re.I | re.S)
+        if m and m[-1].strip():
+            prev_queries.append(m[-1].strip())
+    step_num = int(state.turns or 0) + 1
+    remaining = max(0, int(max_steps) - int(state.turns or 0))
+    raw_obs = str(state.last_observation or "")
+    obs_clean = re.sub(r"</?information>", " ", raw_obs, flags=re.I)
+    obs_clean = re.sub(r"\s+", " ", obs_clean).strip()
+
+    if len(prev_queries) >= 2 and prev_queries[-1].casefold() == prev_queries[-2].casefold():
+        obs_summary = f"Repeated search query '{prev_queries[-1]}'; duplicate results. {obs_clean[:220]}"
+    elif not obs_clean or "no results" in obs_clean.lower() or "no matching" in obs_clean.lower():
+        obs_summary = "No matching search results returned."
+    else:
+        obs_summary = obs_clean[:280]
+
+    parts = [
+        f"Question: {state.question}",
+        f"Search progress: step {step_num} of {max_steps} ({remaining} step(s) remaining).",
+    ]
+    if prev_queries:
+        parts.append("Previous search queries: " + " | ".join(prev_queries[-3:]))
+    parts.append(f"Current observation: {obs_summary}")
+    return "\n".join(parts)
+
+
 def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     config, tokenizer = collector.config, collector.tokenizer
     step = int(gen_batch.meta_info["global_step"])
     actor_config = config.actor_rollout_ref.actor
     tree = TreeRollout(invalid_action_penalty_coef=(
-        float(actor_config.get("invalid_action_penalty_coef", 0.01))
+        float(actor_config.get("invalid_action_penalty_coef", 0.5))
         if actor_config.get("use_invalid_action_penalty", True) else 0.0
     ))
     memory = manager.retrieval_memory
@@ -482,24 +517,33 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
         if not active:
             break
         if depth == 1:
+            cand_k = int(config.env.tree_experience.get(
+                "semantic_candidate_k", config.env.tree_experience.task_top_k
+            ))
             retrieved = memory.retrieve_task_experiences_batch(
                 [s.question for s in active],
                 top_k=config.env.tree_experience.task_top_k,
-                semantic_candidate_k=config.env.tree_experience.task_top_k,
+                semantic_candidate_k=cand_k,
             )
         else:
+            cand_k = int(config.env.tree_experience.get(
+                "semantic_candidate_k", config.env.tree_experience.step_top_k
+            ))
             queries = [
-                f"{s.question}\n\nCurrent observation: {s.last_observation}"
+                build_step_retrieval_query(s, config.env.max_steps)
                 for s in active
             ]
             retrieved = memory.retrieve_step_experiences_batch(
                 queries, top_k=config.env.tree_experience.step_top_k,
-                semantic_candidate_k=config.env.tree_experience.step_top_k,
+                semantic_candidate_k=cand_k,
             )
         decisions = []
-        candidate_limit = int(
-            config.env.tree_experience.task_top_k if depth == 1
-            else config.env.tree_experience.step_top_k
+        candidate_limit = max(
+            int(
+                config.env.tree_experience.task_top_k if depth == 1
+                else config.env.tree_experience.step_top_k
+            ),
+            int(config.env.tree_experience.get("semantic_candidate_k", 0) or 0),
         )
         if len(retrieved) != len(active):
             raise ValueError("Tree experience retrieval returned unexpected batch length")

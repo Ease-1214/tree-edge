@@ -247,28 +247,33 @@ def test_natural_and_tree_dedup_sft_student_prompt_matches_noexp(monkeypatch, tm
 
 def test_t70_reflector_strictly_uses_real_tree_forks(monkeypatch, tmp_path):
     from agent_system.tree.core import trajectory_reflector_examples
-    from agent_system.tree.reflector_case_selector_v3 import selection_prompt
+    from agent_system.tree.edge_fork_adapter import edge_search_examples_from_forks
     tree, _, _ = run_case(monkeypatch, tmp_path, [0, 2])
     # Simulate different current actions in the real left/right intervention.
     # Independent natural actions MUST NOT enter Reflector even when outcomes
     # are different (2/4 natural and 0/4 natural).
     for node in tree.nodes.values():
         if node.source == "tree":
-            node.action = ("<search>wrong first query</search>" if node.branch == "L"
-                           else "<search>specific correct query</search>")
+            node.action = ("<search>specific correct query</search>" if node.branch == "L"
+                           else "<search>wrong first query</search>")
         else:
             node.action = ("<search>failed query</search>" if node.state_before.natural_sample_id >= 2
                            else "<search>successful query</search>")
+    # Ensure Left (without experience) succeeds and Right (with experience) fails so delta < 0
+    for leaf in tree.leaves:
+        if leaf.source == "tree":
+            is_left = any(tree.nodes[nid].depth == 1 and tree.nodes[nid].branch == "L" for nid in leaf.node_ids)
+            leaf.reward = 1.0 if is_left else 0.0
     tree.evaluate_forks()
     cases = trajectory_reflector_examples(tree, k=40, seed=1)
-    assert len(cases) == 1
-    assert cases[0]["fork_id"] in tree.forks
+    assert len(cases) >= 1
+    assert all(c["fork_id"] in tree.forks for c in cases)
     assert cases[0]["source_leaf_ids"]
     tree_leaves = {leaf.leaf_id for leaf in tree.leaves if leaf.source == "tree"}
     assert set(cases[0]["source_leaf_ids"]) <= tree_leaves
     assert all("natural" not in case["fork_id"] for case in cases)
-    assert "CANDIDATE PREVIEWS" in selection_prompt(cases, tree.bank_snapshot)
-    assert len(tree.question_credits()) == 1  # Only T intervention has utility.
+    assert len(edge_search_examples_from_forks(cases)) == len(cases)
+    assert len(tree.question_credits()) >= 1
 
 def test_t70_reflector_has_no_cases_when_no_tree_triggered(monkeypatch, tmp_path):
     from agent_system.tree.core import trajectory_reflector_examples

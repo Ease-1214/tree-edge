@@ -104,12 +104,14 @@ class TreeRollout:
             ) == normalize_action(self.nodes[fork.right_node_id].action)
             l_rewards = [leaf.reward for leaf in left]
             r_rewards = [leaf.reward for leaf in right]
+            l_mean = subtree_value(fork.left_node_id, left)
+            r_mean = subtree_value(fork.right_node_id, right)
             utility = (
                 statistics.mean(fork.utility_snapshot)
                 if fork.utility_snapshot
                 else float("-inf")
             )
-            delta = statistics.mean(r_rewards) - statistics.mean(l_rewards)
+            delta = r_mean - l_mean
             informative = len(set(l_rewards + r_rewards)) > 1
             # T70: distill only real behavior changes with positive subtree
             # *mean* advantage; do not hard-filter by historical Utility or T.
@@ -133,6 +135,8 @@ class TreeRollout:
                     right_leaf_ids=[x.leaf_id for x in right],
                     left_rewards=l_rewards,
                     right_rewards=r_rewards,
+                    left_mean=l_mean,
+                    right_mean=r_mean,
                     delta=delta,
                     same_action=same,
                     informative=informative,
@@ -145,13 +149,15 @@ class TreeRollout:
 
     def training_advantages(self):
         coefficient = float(getattr(self, "invalid_action_penalty_coef", 0.0))
-        scores = {
-            leaf.leaf_id: leaf.reward - coefficient * sum(
+        base = leaf_advantages(self.leaves)
+        if coefficient == 0.0:
+            return base
+        return {
+            leaf.leaf_id: base[leaf.leaf_id] - coefficient * sum(
                 not self.nodes[node_id].valid for node_id in leaf.node_ids
             )
             for leaf in self.leaves
         }
-        return leaf_advantages(self.leaves, scores=scores)
 
     def expanded_rows(self):
         advantages = self.training_advantages()
@@ -202,6 +208,27 @@ class TreeRollout:
     def question_credits(self):
         """Backward-compatible name; credits are now per Fork, not per question."""
         return self.fork_credits()
+
+
+def subtree_value(node_id, leaves):
+    """Recursive bottom-up node value so early-terminating branches (1 leaf)
+    are weighted equally with deep subtrees (2..8 leaves) at every fork."""
+    direct_rewards = []
+    children_leaves = defaultdict(list)
+    for leaf in leaves:
+        try:
+            idx = leaf.node_ids.index(node_id)
+        except ValueError:
+            continue
+        if idx + 1 >= len(leaf.node_ids):
+            direct_rewards.append(float(leaf.reward))
+        else:
+            children_leaves[leaf.node_ids[idx + 1]].append(leaf)
+    values = direct_rewards + [
+        subtree_value(child_id, child_group)
+        for child_id, child_group in children_leaves.items()
+    ]
+    return statistics.mean(values) if values else 0.0
 
 
 def normalize_action(action):
@@ -265,11 +292,11 @@ class QuestionEvidence:
         )
 
     def merge_window(self, bank, step, beta=0.1, management_interval_steps=5):
-        """EMA over all per-Fork gains; EDGE-style consecutive-negative evidence.
+        """EMA over all per-Fork gains; consecutive-negative window tracking.
 
-        Only observed consecutive management windows build a negative streak.
-        A positive/zero-gain or unobserved window breaks the streak. Historical
-        question statistics remain diagnostics and are NOT deletion criteria.
+        Only a strictly positive window (delta > 0) resets the negative streak.
+        Neutral (delta == 0) or unobserved windows preserve the existing streak
+        so harmful experiences are not washed clean by uninformative turns.
         Hard deletion is done later by ExperienceMemory.evict_excess_experiences.
         """
         updates = []
@@ -279,6 +306,8 @@ class QuestionEvidence:
                 pending = self.state["pending"].get(eid, {})
                 evidence = item.setdefault("evidence", {})
                 evidence["tree_question_statistics"] = self.statistics(eid)
+                evidence.setdefault("consecutive_negative_windows", 0)
+                evidence.setdefault("last_negative_management_step", None)
                 if pending:
                     # Every Fork contributes equally, including several Forks
                     # from one question. Do not macro-average over questions.
@@ -290,17 +319,11 @@ class QuestionEvidence:
                     evidence["last_updated_step"] = step
 
                     if delta < 0:
-                        previous = evidence.get("last_negative_management_step")
-                        adjacent = (
-                            previous is not None
-                            and int(step) - int(previous) == int(management_interval_steps)
-                        )
                         evidence["consecutive_negative_windows"] = (
                             int(evidence.get("consecutive_negative_windows", 0) or 0) + 1
-                            if adjacent else 1
                         )
                         evidence["last_negative_management_step"] = int(step)
-                    else:
+                    elif delta > 0:
                         evidence["consecutive_negative_windows"] = 0
                         evidence["last_negative_management_step"] = None
                     updates.append(dict(
@@ -312,11 +335,6 @@ class QuestionEvidence:
                         fork_count=len(credits),
                         consecutive_negative_windows=evidence["consecutive_negative_windows"],
                     ))
-                else:
-                    # An unused management window is not a negative result.
-                    # It also must not bridge two nonadjacent negative windows.
-                    evidence["consecutive_negative_windows"] = 0
-                    evidence["last_negative_management_step"] = None
         self.state["pending"] = {}
         return updates
 
@@ -366,14 +384,14 @@ def fork_reflector_examples(tree):
                 paired_rollout={
                     "with_experience": {
                         "action": right.action,
-                        "score": statistics.mean(audit["right_rewards"]),
+                        "score": audit.get("right_mean", statistics.mean(audit["right_rewards"])),
                         "successes": sum(audit["right_rewards"]),
                         "total": len(audit["right_rewards"]),
                         "experience_ids": audit["new_experience_ids"],
                     },
                     "without_experience": {
                         "action": left.action,
-                        "score": statistics.mean(audit["left_rewards"]),
+                        "score": audit.get("left_mean", statistics.mean(audit["left_rewards"])),
                         "successes": sum(audit["left_rewards"]),
                         "total": len(audit["left_rewards"]),
                     },

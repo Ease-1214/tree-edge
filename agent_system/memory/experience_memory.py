@@ -59,9 +59,9 @@ _TASK_QUERY_HINTS = {
     "pick_cool_then_place_in_recep": "cool the target object and place it in the receptacle",
     "pick_clean_then_place_in_recep": "clean the target object and place it in the receptacle",
     "examine": "examine the object carefully",
-    "general": "general ALFWorld interaction and action parsing",
-    "unknown": "general ALFWorld interaction and action parsing",
-    "all": "general ALFWorld interaction and action parsing",
+    "general": "answer an open-domain question by searching and verifying evidence",
+    "unknown": "answer an open-domain question by searching and verifying evidence",
+    "all": "answer an open-domain question by searching and verifying evidence",
     "apparel": "shop for clothing with the requested material, size, color, fit, and price",
     "footwear": "shop for shoes or other footwear with the requested size, color, use, and price",
     "home_decor": "shop for a home item with the requested dimensions, material, pattern, and color",
@@ -73,6 +73,12 @@ _TASK_QUERY_HINTS = {
     "entity_attribute_lookup": "look up a named entity's occupation, nationality, birthplace, genre, or language",
     "multi_hop_reasoning": "answer a multi-hop question by resolving an intermediate entity before the final relation",
     "comparison": "compare two entities using the same requested attribute",
+    "temporal": "answer a time-sensitive question using the relevant year, release date, or temporal order",
+    "numeric": "extract an exact number, date, duration, rank, or population with matching unit and year",
+    "list_intersection": "find the entity that satisfies two separate conditions by searching the rarer condition first",
+    "source_identification": "identify who wrote, directed, composed, performed, or published a named work",
+    "location_chain": "resolve an intermediate institution or venue before looking up its city, region, or country",
+    "answer_normalization": "return the shortest unambiguous canonical name or value supported by the evidence",
 }
 
 
@@ -264,13 +270,20 @@ class ExperienceMemory(BaseMemory):
 
     def _legacy_bank_to_new_schema(self, loaded: Dict[str, Any]) -> Dict[str, Any]:
         experiences = list(loaded.get("experiences") or [])
-        step_experiences = [
-            self._legacy_experience_to_step_experience(exp, idx)
-            for idx, exp in enumerate(experiences, start=1)
-            if isinstance(exp, dict)
-        ]
-        task_experiences = self._synthesise_task_experiences(step_experiences)
         metadata = deepcopy(loaded.get("metadata") or {})
+        env = str(metadata.get("env") or "").lower()
+        task_experiences: List[Dict[str, Any]] = []
+        step_experiences: List[Dict[str, Any]] = []
+        for idx, exp in enumerate(experiences, start=1):
+            if not isinstance(exp, dict):
+                continue
+            converted = self._legacy_experience_to_step_experience(exp, idx)
+            if str(exp.get("experience_type") or "").lower() == "task":
+                task_experiences.append(converted)
+            else:
+                step_experiences.append(converted)
+        if not task_experiences and env != "search":
+            task_experiences = self._synthesise_task_experiences(step_experiences)
         metadata.update(
             {
                 "migration_source": "legacy_experiences",
@@ -288,7 +301,7 @@ class ExperienceMemory(BaseMemory):
 
     def _canonical_task_query(self, task_type: str) -> str:
         hint = _TASK_QUERY_HINTS.get(task_type, task_type.replace("_", " ").strip())
-        return hint or "general ALFWorld interaction"
+        return hint or "answer an open-domain question by searching and verifying evidence"
 
     def _legacy_experience_to_step_experience(
         self,
@@ -1043,6 +1056,8 @@ class ExperienceMemory(BaseMemory):
         for j, query in enumerate(query_texts):
             s = np.asarray(sims[:, j]).ravel()
             idx_2k = np.lexsort((-np.arange(len(s)), -s))[:top_2k].tolist()
+            if self.similarity_threshold is not None:
+                idx_2k = [i for i in idx_2k if float(s[int(i)]) >= self.similarity_threshold]
             if self._retrieval_alpha is not None:
                 idx_final = self._apply_simutil_ucb(pool_name, idx_2k, s, top_k)
             else:
@@ -1418,16 +1433,16 @@ class ExperienceMemory(BaseMemory):
             return None
         lines = [title]
         for experience in experiences:
-            heading = experience.get("title") or experience.get("principle") or experience.get("when_to_apply") or ""
-            principle = experience.get("principle", "")
-            when_to_apply = experience.get("when_to_apply", "")
+            heading = (experience.get("title") or experience.get("trigger") or experience.get("when_to_apply") or "").strip()
+            principle = (experience.get("principle") or experience.get("recommended_action") or "").strip()
+            when_to_apply = (experience.get("when_to_apply") or "").strip()
             if heading and principle:
                 lines.append(f"- **{heading}**: {principle}")
             elif heading:
                 lines.append(f"- **{heading}**")
             elif principle:
                 lines.append(f"- {principle}")
-            if when_to_apply:
+            if when_to_apply and _normalise_text(when_to_apply) != _normalise_text(heading):
                 lines.append(f"  _When to apply: {when_to_apply}_")
         return "\n".join(lines)
 
@@ -1461,7 +1476,10 @@ class ExperienceMemory(BaseMemory):
         step_section = self._format_experience_section("### Step-level experience (relevant to current situation)", step_experiences or [])
         if step_section:
             sections.append(step_section)
-        return "\n\n".join(sections) if sections else "No relevant experiences found for this task."
+        if not sections:
+            return "No relevant experiences found for this task."
+        sections.append("_Note: If the retrieved passages already explicitly answer the question, output `<answer>` directly rather than issuing redundant searches._")
+        return "\n\n".join(sections)
 
     # ------------------------------------------------------------------ #
     # Update / persistence                                                #
@@ -1485,9 +1503,10 @@ class ExperienceMemory(BaseMemory):
             for experience in self.experiences.get("task_experiences", []) + self.experiences.get("step_experiences", [])
         }
         added = 0
+        cache_invalidated = False
 
         def _append_experience(pool_name: str, experience: Dict[str, Any]) -> None:
-            nonlocal added
+            nonlocal added, cache_invalidated
             clean = deepcopy(experience)
             clean.setdefault("task_type", "unknown")
             clean.setdefault("utility", DEFAULT_UTILITY)
@@ -1509,7 +1528,41 @@ class ExperienceMemory(BaseMemory):
                 )
                 if "evidence" in clean:
                     self._merge_evidence(target, clean.get("evidence", {}))
+                cache_invalidated = True
                 return
+
+            # Vector cosine similarity deduplication (>= 0.85) within the target pool
+            # when embedding retrieval is enabled.
+            if self.retrieval_mode == "embedding" and self.experiences.get(pool_name):
+                try:
+                    import numpy as np
+                    cache = self._compute_pool_embeddings(pool_name)
+                    pool_embs = cache.get("embeddings")
+                    pool_items = cache.get("items") or []
+                    if pool_embs is not None and getattr(pool_embs, "size", 0) > 0 and len(pool_items) > 0:
+                        new_text = self._experience_text_for_embedding(clean)
+                        new_emb = np.asarray(self._encode_texts([new_text], normalize_embeddings=True)).ravel()
+                        sims = np.asarray(pool_embs @ new_emb).ravel()
+                        best_idx = int(np.argmax(sims))
+                        if float(sims[best_idx]) >= 0.85:
+                            target = pool_items[best_idx]
+                            if float(target.get("utility", 0.0) or 0.0) < 0.0:
+                                target.update(
+                                    {
+                                        k: v
+                                        for k, v in clean.items()
+                                        if k not in _EXPERIENCE_LIFECYCLE_FIELDS and v not in (None, "", [])
+                                    }
+                                )
+                                existing[self._experience_content_fingerprint(target)] = target
+                                attr = "_task_experience_embeddings_cache" if pool_name == "task_experiences" else "_step_experience_embeddings_cache"
+                                setattr(self, attr, None)
+                                cache_invalidated = True
+                            if "evidence" in clean:
+                                self._merge_evidence(target, clean.get("evidence", {}))
+                            return
+                except Exception:
+                    pass
 
             # Do not allow an old/deleted ID (including legacy exp IDs) to
             # refer to a new lifecycle. Fresh generated experiences normally
@@ -1531,6 +1584,8 @@ class ExperienceMemory(BaseMemory):
                 self.reserve_experience_ids([supplied])
             self.experiences.setdefault(pool_name, []).append(clean)
             existing[fp] = clean
+            attr = "_task_experience_embeddings_cache" if pool_name == "task_experiences" else "_step_experience_embeddings_cache"
+            setattr(self, attr, None)
             added += 1
 
         for experience in task_experiences:
@@ -1538,7 +1593,7 @@ class ExperienceMemory(BaseMemory):
         for experience in step_experiences:
             _append_experience("step_experiences", experience)
 
-        if added:
+        if added or cache_invalidated:
             self._task_experience_embeddings_cache = None
             self._step_experience_embeddings_cache = None
             self._query_cache.clear()
@@ -1716,23 +1771,14 @@ class ExperienceMemory(BaseMemory):
                 evidence["negative_gain_count"] = int(evidence.get("negative_gain_count", 0) or 0) + negative
                 evidence["neutral_gain_count"] = int(evidence.get("neutral_gain_count", 0) or 0) + neutral
                 evidence["utility_update_count"] = int(evidence.get("utility_update_count", 0) or 0) + 1
+                evidence.setdefault("consecutive_negative_windows", 0)
+                evidence.setdefault("last_negative_management_step", None)
                 if credit < 0.0:
-                    previous_negative_step = evidence.get("last_negative_management_step")
-                    is_adjacent_negative = management_interval_steps is None
-                    if management_interval_steps is not None and previous_negative_step is not None:
-                        try:
-                            is_adjacent_negative = (
-                                int(global_step) - int(previous_negative_step) == management_interval_steps
-                            )
-                        except (TypeError, ValueError):
-                            is_adjacent_negative = False
                     evidence["consecutive_negative_windows"] = (
                         int(evidence.get("consecutive_negative_windows", 0) or 0) + 1
-                        if is_adjacent_negative
-                        else 1
                     )
                     evidence["last_negative_management_step"] = int(global_step)
-                else:
+                elif credit > 0.0:
                     evidence["consecutive_negative_windows"] = 0
                     evidence["last_negative_management_step"] = None
                 evidence["last_updated_step"] = int(global_step)
