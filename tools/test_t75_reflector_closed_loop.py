@@ -312,7 +312,7 @@ def run_live_api_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
         model=os.environ.get("EXPERIENCE_UPDATE_MODEL"),
         max_new_experiences_per_update=5,
     )
-    print(f"  Endpoint: {updater.base_url}")
+    print(f"  Endpoint: {updater.client.base_url}")
     print(f"  Model:    {updater.model}")
     print(f"  Validator enabled: {os.environ.get('ENABLE_EXPERIENCE_TYPE_VALIDATION', '0')}")
     additions = updater.analyze_failures(
