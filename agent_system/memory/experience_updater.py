@@ -43,7 +43,8 @@ class ExperienceUpdater:
         if OpenAI is None:
             raise ImportError("The 'openai' package is required to initialize ExperienceUpdater client.")
 
-        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=285.0)
+        default_timeout = float(os.environ.get("EXPERIENCE_UPDATE_TIMEOUT_SECONDS", "330.0"))
+        self.client = OpenAI(api_key=api_key, base_url=base_url, max_retries=0, timeout=default_timeout)
         self._audit_request_count = 0
         if os.environ.get("T063_REFLECTOR_AUDIT") == "1":
             self.client._client.event_hooks.setdefault("request", []).append(self._audit_request)
@@ -61,7 +62,9 @@ class ExperienceUpdater:
     def _audit_request(self, request):
         self._audit_request_count += 1
 
-    def _completion_with_deadline(self, request_kwargs, total_seconds=300.0):
+    def _completion_with_deadline(self, request_kwargs, total_seconds=None):
+        if total_seconds is None:
+            total_seconds = float(os.environ.get("EXPERIENCE_UPDATE_DEADLINE_SECONDS", "340.0"))
         if getattr(self, "_request_thread", None) is not None and self._request_thread.is_alive():
             raise TimeoutError("Previous reflector request is still ending")
         results = queue.Queue(maxsize=1)

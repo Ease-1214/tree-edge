@@ -301,6 +301,8 @@ def run_offline_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
 
 
 def run_live_api_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
+    import time
+
     print("=" * 80)
     print("[LIVE API MODE] Testing Real LLM Reflection + Bank Upsert")
     print("=" * 80)
@@ -315,15 +317,45 @@ def run_live_api_closed_loop(tree: TreeRollout, memory: ExperienceMemory):
     print(f"  Endpoint: {updater.client.base_url}")
     print(f"  Model:    {updater.model}")
     print(f"  Validator enabled: {os.environ.get('ENABLE_EXPERIENCE_TYPE_VALIDATION', '0')}")
-    additions = updater.analyze_failures(
+
+    # 1) Full 24-item bank check: verifies strict anti-duplication when patterns already exist
+    t0 = time.perf_counter()
+    full_bank_additions = updater.analyze_failures(
         failed_trajectories=edge_examples,
         current_experiences=memory.experiences,
     )
-    print(f"  Succeeded: {updater.last_update_succeeded}, Extracted: {len(additions)}")
-    for idx, item in enumerate(additions, 1):
-        print(f"    [{idx}] ({item.get('experience_type')}) {item.get('title')}: {item.get('trigger')}")
+    dt_full = time.perf_counter() - t0
+    print(
+        f"  [Full 24-Item Bank] Latency: {dt_full:.2f}s | Succeeded: {updater.last_update_succeeded} "
+        f"| Extracted: {len(full_bank_additions)} (0 expected when existing bank already covers test patterns)"
+    )
     if not updater.last_update_succeeded:
-        raise RuntimeError(f"Live API call failed: {updater.last_failure_reason}")
+        raise RuntimeError(f"Live API call failed on full bank: {updater.last_failure_reason}")
+
+    # 2) Minimal 2-item seed bank check: verifies novel Task (depth=1) + Step (depth=2) extraction & quality
+    seed_bank = {
+        "task_experiences": [memory.experiences["task_experiences"][0]],
+        "step_experiences": [memory.experiences["step_experiences"][0]],
+    }
+    t1 = time.perf_counter()
+    additions = updater.analyze_failures(
+        failed_trajectories=edge_examples,
+        current_experiences=seed_bank,
+    )
+    dt_seed = time.perf_counter() - t1
+    print(
+        f"  [Minimal Seed Bank] Latency: {dt_seed:.2f}s | Succeeded: {updater.last_update_succeeded} "
+        f"| Extracted: {len(additions)}"
+    )
+    for idx, item in enumerate(additions, 1):
+        print(
+            f"    [{idx}] ({item.get('experience_type')} / {item.get('task_type')})\n"
+            f"        trigger:            {item.get('trigger')}\n"
+            f"        recommended_action: {item.get('recommended_action')}\n"
+            f"        avoid_action:       {item.get('avoid_action')}"
+        )
+    if not updater.last_update_succeeded or not additions:
+        raise RuntimeError(f"Live API extraction on minimal seed bank failed: {updater.last_failure_reason}")
     metrics = write_new_experiences(memory, additions, step=5)
     print(f"  Upsert metrics: {metrics}")
     print("\nCLOSED_LOOP_LIVE_API_OK")
