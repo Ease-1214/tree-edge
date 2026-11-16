@@ -336,3 +336,18 @@ def test_clean_wandb_metrics_groups_into_six_panels():
     assert "val/strict_em" not in cleaned
 
 
+def test_build_step_retrieval_query_summarizes_queries_and_obs():
+    pytest.importorskip("torch")
+    from agent_system.tree.runner import build_step_retrieval_query
+
+    state = SearchBranchState("q_step", "Who directed the 1999 film The Mummy?", ["Stephen Sommers"], "nq")
+    state.turns = 1
+    state.history = [("<think>try</think><search>The Mummy director</search>", "<information>Doc 1</information>")]
+    state.last_observation = "<information>The Mummy (1932) directed by Karl Freund.</information>"
+    q = build_step_retrieval_query(state, max_steps=4)
+    assert "Previous search queries: The Mummy director" in q
+    assert "Karl Freund" in q
+    assert "<information>" not in q
+
+
+
