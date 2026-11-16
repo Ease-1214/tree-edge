@@ -62,7 +62,7 @@ case "$GPU_PROFILE" in
   2xa40)
     # 2x A40 (48GB VRAM each): ample VRAM allows larger token budgets and vLLM KV cache
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
-    export PERF_GPUS=2
+    export PERF_GPUS=${PERF_GPUS:-2}
     export PERF_FSDP_SIZE=${PERF_FSDP_SIZE:-1}
     export TENSOR_MODEL_PARALLEL_SIZE=1
     export PERF_MODEL_DTYPE=bf16
