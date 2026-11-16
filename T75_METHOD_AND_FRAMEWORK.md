@@ -29,7 +29,7 @@
   * 统一规范为 11 类 Search `task_type`：`general`、`direct_retrieval`、`entity_attribute_lookup`、`multi_hop_reasoning`、`comparison`、`temporal`、`numeric`、`list_intersection`、`source_identification`、`location_chain`、`answer_normalization`。
 * **初筛 + UCB 重排 + Top-1 注入**：
   * **Query 构造**：Task 级仅使用初始问题；Step 级使用 `build_step_retrieval_query()` 提取结构化状态摘要（问题 + 已执行查询 + 最新检索结果关键片段）。
-  * **0.4 相似度硬门槛**：使用本地 `Qwen3-Embedding-0.6B` 计算余弦相似度，**先过滤掉相似度 `< 0.4` 的候选**（若全部低于 `0.4`，直接跳过本次分叉，绝不强行注入无关经验）。
+  * **0.4 相似度硬门槛**：使用 `Qwen3-Embedding-0.6B`（默认通过 `http://127.0.0.1:29700` 调用 248 共享服务，亦可本地加载）计算余弦相似度，**先过滤掉相似度 `< 0.4` 的候选**（若全部低于 `0.4`，直接跳过本次分叉，绝不强行注入无关经验）。
   * **UCB 重排选 Top-1**：在通过 `0.4` 门槛的候选中（候选池上限 12），结合相似度与历史效用 UCB 选出 **Top-1** 注入，避免多条经验相互冲突。
 
 ### 3. GRPO 组内优势与格式惩罚解耦
