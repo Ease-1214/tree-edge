@@ -36,7 +36,7 @@
 * **设计痛点**：遇到难题时模型易在 `<think>` 中长篇推理直至超出 500 tokens 被截断（`valid = False`）。若先对 `valid = False` 扣分再做 GRPO 组内标准化，会导致同组“格式合法但答错（reward=0）”的叶子获得**正优势**，变相鼓励模型乱猜短答案。
 * **T75 解耦做法（`TreeRollout.expanded_rows` & `apply_invalid_action_penalty`）**：
   1. 先仅用原始正确性奖励 $r \in \{0, 1\}$ 计算组内标准化优势（且按节点被多少叶子共享做同步权重稀释，使提前答对与提前答错权重对称）；
-  2. 标准化完成后，再对 `valid == False` 的节点单独扣除固定格式惩罚（`invalid_action_penalty_coef = 0.1` 或配置值）。
+  2. 标准化完成后，再对 `valid == False` 的节点单独扣除固定格式惩罚（`invalid_action_penalty_coef = 0.5`）。
 
 ### 4. 三项损失协同：GRPO PG + OPSD（Top-20 Reverse KL）+ Success SFT
 总优化目标为：

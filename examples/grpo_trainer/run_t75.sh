@@ -228,7 +228,7 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   actor_rollout_ref.actor.optim.lr=2e-5 \
   actor_rollout_ref.actor.optim.lr_warmup_steps=5 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
-  actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
+  actor_rollout_ref.actor.invalid_action_penalty_coef=0.5 \
   env.rollout.n=1 \
   env.tree_experience.enable=True \
   env.tree_experience.conditional_natural.enable=True \

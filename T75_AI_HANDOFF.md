@@ -11,7 +11,7 @@
    * **模块 2（检索状态摘要与门控）**：`build_step_retrieval_query()` 构造状态摘要，`0.4` 余弦相似度硬门槛初筛 + UCB 重排选 Top-1，全低于 `0.4` 则跳过分叉。
    * **模块 3（无偏递归子树价值）**：`TreeRollout.evaluate_forks()` 自底向上递归计算子树期望，消除深层多叶分支权重偏差。
    * **模块 4（Reflector 分层抽样与单次调用）**：仅选 `delta < 0` 分叉，按 `depth=1` / `depth>=2` 分桶抽样；默认 1-call 提取（`ENABLE_EXPERIENCE_TYPE_VALIDATION=0`），Prompt 注入已有经验与 `STRICT ANTI-DUPLICATION` 铁律，入库 `0.85` 向量去重；客户端默认超时延至 `330s`（deadline `340s`）。
-   * **模块 5（GRPO 格式惩罚解耦与 SFT 掩码）**：先对 `0/1` 原始奖励做组内标准化，再对 `valid=False` 扣 `0.1`；`sft_weight = float(leaf.reward == 1 and node.valid)`。
+   * **模块 5（GRPO 格式惩罚解耦与 SFT 掩码）**：先对 `0/1` 原始奖励做组内标准化，再对 `valid=False` 扣 `0.5`；`sft_weight = float(leaf.reward == 1 and node.valid)`。
    * **模块 6（训练性能优化、多卡启动与 W&B 重写）**：
      * 向量化 `EpisodeRewardManager` 与 `apply_invalid_action_penalty`，默认关闭每步同步写盘 `tree-step*.pt`（需开启设 `SAVE_TREE_SNAPSHOT=1`），精简 `compute_log_prob` 传输；
      * 新增统一启动脚本 `examples/grpo_trainer/run_t75.sh`（支持 `2xa40`、`4x3090`、`8x3090`、`auto`）；
