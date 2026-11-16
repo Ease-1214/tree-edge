@@ -59,7 +59,8 @@ export TRAIN_DATA=${T069_TRAIN_DATA:-$T061/data/train.parquet} VAL_DATA=${T069_V
 export EMBEDDING_MODEL=$T061/assets/Qwen3-Embedding-0.6B
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 export SEARCH_URL=${SEARCH_URL:-http://127.0.0.1:29661/retrieve}
-export NO_PROXY=127.0.0.1,localhost${EMBED_HOST:+,$EMBED_HOST} no_proxy=127.0.0.1,localhost${EMBED_HOST:+,$EMBED_HOST}
+LOCAL_NODE_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+export NO_PROXY=127.0.0.1,localhost${LOCAL_NODE_IP:+,$LOCAL_NODE_IP}${EMBED_HOST:+,$EMBED_HOST} no_proxy=127.0.0.1,localhost${LOCAL_NODE_IP:+,$LOCAL_NODE_IP}${EMBED_HOST:+,$EMBED_HOST}
 export N_GPUS_PER_NODE=$PERF_GPUS TRAIN_DATA_SIZE=$PERF_QUESTIONS VAL_DATA_SIZE=128 GROUP_SIZE=8
 # Optional server-local network settings contain no credentials.
 if [[ -f "$ROOT/wandb-online.env" ]]; then
