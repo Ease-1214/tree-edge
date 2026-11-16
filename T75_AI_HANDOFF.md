@@ -40,8 +40,10 @@
 > 1. **31 服务器的 GPU `0,1` 属于其他用户（正在跑任务），严禁触碰！** 在 31 上启动训练时，务必指定 `CUDA_VISIBLE_DEVICES=2,3`（先用 `nvidia-smi` 确认 `2,3` 空闲）。
 > 2. **切勿打印或提交任何 API Key**（`/home/zehao/.edge_reflector.env` 及 251 上的 `*.json` 密钥文件）。
 
-### Step 1：将最新 `t75` 分支同步到 31 服务器的工作目录
-本仓库当前在开发机 `C:\Users\12538\.gemini\antigravity\scratch\tree-edge` 的 `t75` 分支。启动训练前，可通过 `git push origin t75` 并在 31 拉取，或打包 `git bundle create t75.bundle t75` 上传至 31 解压。
+### Step 1：直接在 31 或 249 的 T075 仓库目录启动（已同步最新 `t75` 分支）
+两台训练机均已统一部署仓库至 `/home/zehao/echo-collab/T075/tree-edge`（并已配置好 `248 -> 31/249` 的 `29661`/`29700`/`29662` 隧道与 `251 -> 31` 的 `29663` 隧道）：
+* **31 服务器（4×A40）**：`cd /home/zehao/echo-collab/T075/tree-edge`，使用 `GPU_PROFILE=2xa40 CUDA_VISIBLE_DEVICES=2,3 bash examples/grpo_trainer/run_t75.sh`（自动挂载 `TRITON_LIBCUDA_PATH` 并对齐 `api.wandb.ai`）。
+* **249 服务器（8×3090）**：`cd /home/zehao/echo-collab/T075/tree-edge`，使用 `GPU_PROFILE=8x3090` 或 `4x3090` 启动（已补齐 `nq_hotpotqa_full11015.parquet`）。
 
 ### Step 2：在 31 上检查两个 SSH 反向隧道端口（`29663` 与 `29661`）
 在 31 上执行：

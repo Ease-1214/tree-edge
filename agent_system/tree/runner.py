@@ -476,7 +476,7 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
     step = int(gen_batch.meta_info["global_step"])
     actor_config = config.actor_rollout_ref.actor
     tree = TreeRollout(invalid_action_penalty_coef=(
-        float(actor_config.get("invalid_action_penalty_coef", 0.5))
+        float(actor_config.get("invalid_action_penalty_coef", 0.1))
         if actor_config.get("use_invalid_action_penalty", True) else 0.0
     ))
     memory = manager.retrieval_memory

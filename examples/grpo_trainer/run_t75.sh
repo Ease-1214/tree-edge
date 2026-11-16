@@ -136,6 +136,9 @@ export PERF_RUN_DIR="$RUN_DIR"
 export T062_ROOT="$ROOT"
 
 export TMPDIR="$ROOT/tmp" XDG_CACHE_HOME="$ROOT/cache" TORCH_EXTENSIONS_DIR="$ROOT/torch_extensions"
+if [[ -z "${TRITON_LIBCUDA_PATH:-}" && -d "/home/zehao/echo-collab/T073/cuda-driver-link" ]]; then
+  export TRITON_LIBCUDA_PATH="/home/zehao/echo-collab/T073/cuda-driver-link"
+fi
 export RAY_TMPDIR=${RAY_TMPDIR:-/dev/shm/t75-${GPU_PROFILE}-ray}
 mkdir -p "$RUN_DIR" "$TMPDIR" "$XDG_CACHE_HOME" "$TORCH_EXTENSIONS_DIR" "$RAY_TMPDIR"
 chmod 700 "$RAY_TMPDIR"
@@ -188,6 +191,11 @@ export PERF_STEPS=${PERF_STEPS:-200}
 
 export WANDB_MODE=${WANDB_MODE:-online}
 export T062_HTTP_PROXY=${T062_HTTP_PROXY:-http://127.0.0.1:29662}
+if [[ -z "${WANDB_BASE_URL:-}" && -f "$HOME/.netrc" ]]; then
+  if ! grep -q "api\.forge\.coreweave\.com" "$HOME/.netrc" && grep -q "api\.wandb\.ai" "$HOME/.netrc"; then
+    export WANDB_BASE_URL="https://api.wandb.ai"
+  fi
+fi
 export T72_WANDB_STARTUP_HEARTBEAT=1
 export WANDB_DIR="$RUN_DIR"
 export WANDB_RUN_GROUP=${WANDB_RUN_GROUP:-t75}
@@ -220,7 +228,7 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   actor_rollout_ref.actor.optim.lr=2e-5 \
   actor_rollout_ref.actor.optim.lr_warmup_steps=5 \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.0 \
-  actor_rollout_ref.actor.invalid_action_penalty_coef=0.5 \
+  actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
   env.rollout.n=1 \
   env.tree_experience.enable=True \
   env.tree_experience.conditional_natural.enable=True \

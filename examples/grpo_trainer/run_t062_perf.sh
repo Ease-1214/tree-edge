@@ -69,7 +69,7 @@ export WANDB_MODE=${WANDB_MODE:-online}
 export HTTP_PROXY=${T062_HTTP_PROXY:-http://127.0.0.1:7890}
 export HTTPS_PROXY=$HTTP_PROXY
 export http_proxy=$HTTP_PROXY https_proxy=$HTTPS_PROXY
-export WANDB_BASE_URL=https://api.forge.coreweave.com WANDB_ENTITY=wuzehao1214-sun-yat-sen-university
+export WANDB_BASE_URL=${WANDB_BASE_URL:-https://api.forge.coreweave.com} WANDB_ENTITY=${WANDB_ENTITY:-wuzehao1214-sun-yat-sen-university}
 unset EDGE_SMOKE_AUDIT   # no per-step hashing / probes in throughput runs
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
