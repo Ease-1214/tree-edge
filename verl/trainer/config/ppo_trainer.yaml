@@ -342,6 +342,7 @@ env:
     experience_retrieval_reload_mode: inline
     save_to_canonical_path: True
     similarity_threshold: null
+    step_similarity_threshold: null
     task_specific_top_k: null
     top_k: 6
     top_k_task: null

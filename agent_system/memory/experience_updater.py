@@ -573,7 +573,7 @@ Return ONLY a JSON array of experience objects.
         """Map source example numbers to real trajectory ids, reset LLM-provided counters,
         and drop experiences that copy an example's answer string verbatim."""
         answers = set()
-        for traj in failed_trajectories[:10]:
+        for traj in failed_trajectories[:12]:
             pair = traj.get("paired_rollout", {}) or {}
             for side in ("with_experience", "without_experience"):
                 ans = self._extract_answer((pair.get(side, {}) or {}).get("action", ""))

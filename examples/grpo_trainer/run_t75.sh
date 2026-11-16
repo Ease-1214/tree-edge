@@ -239,10 +239,11 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   env.experience_memory.experiences_json_path="$EXPERIENCES_JSON" \
   env.experience_memory.top_k=12 \
   env.experience_memory.task_specific_top_k=12 \
-  env.experience_memory.similarity_threshold=0.4 \
+  env.experience_memory.similarity_threshold=0.3 \
+  env.experience_memory.step_similarity_threshold=0.3 \
   env.experience_memory.max_new_experiences=5 \
   env.experience_memory.management.retrieval_alpha=0.5 \
-  env.experience_memory.management.retrieval_ucb_c=0.5 \
+  env.experience_memory.management.retrieval_ucb_c=0.2 \
   env.tree_experience.utility_ema_beta=0.1 \
   env.tree_experience.utility_update_interval=5 \
   env.experience_memory.management.eviction_utility_threshold=-0.05 \

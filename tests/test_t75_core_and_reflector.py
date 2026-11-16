@@ -343,11 +343,227 @@ def test_build_step_retrieval_query_summarizes_queries_and_obs():
     state = SearchBranchState("q_step", "Who directed the 1999 film The Mummy?", ["Stephen Sommers"], "nq")
     state.turns = 1
     state.history = [("<think>try</think><search>The Mummy director</search>", "<information>Doc 1</information>")]
-    state.last_observation = "<information>The Mummy (1932) directed by Karl Freund.</information>"
+    state.last_observation = "<information>Doc 1(Title: The Mummy (1932 film)) The Mummy (1932) directed by Karl Freund.</information>"
     q = build_step_retrieval_query(state, max_steps=4)
-    assert "Previous search queries: The Mummy director" in q
+    assert "Search progress:" not in q
+    assert "Previous search queries:" not in q
+    assert "Titles: The Mummy (1932 film)." in q
     assert "Karl Freund" in q
     assert "<information>" not in q
+
+    empty_state = SearchBranchState("q_empty", "When was A founded?", ["1900"], "nq")
+    empty_state.turns = 1
+    empty_state.history = [("<search>A founded</search>", "<information>No matching search results returned.</information>")]
+    empty_state.last_observation = "<information>No matching search results returned.</information>"
+    q_empty = build_step_retrieval_query(empty_state, max_steps=4)
+    assert "no matching results" in q_empty.lower()
+    assert "Excerpt:" not in q_empty
+
+    rep_state = SearchBranchState("q_rep", "Who directed X?", ["Y"], "nq")
+    rep_state.turns = 2
+    rep_state.history = [
+        ("<search>X director</search>", "<information>Doc 1(Title: X) Some snippet</information>"),
+        ("<search>X director</search>", "<information>Doc 1(Title: X) Some snippet</information>"),
+    ]
+    rep_state.last_observation = "<information>Doc 1(Title: X) Some snippet</information>"
+    q_rep = build_step_retrieval_query(rep_state, max_steps=4)
+    assert "repeated identical search query" in q_rep.lower()
+
+
+def test_five_step_window_accumulates_and_selects_up_to_twelve(tmp_path):
+    from agent_system.tree.reflector_selection_v3 import select_window_reflector_contrasts
+    from agent_system.tree.training import manage_tree_experiences
+
+    def make_harmed_tree(step_num, prefix):
+        tree = TreeRollout()
+        tree.bank_snapshot = {
+            "task_experiences": [
+                {"experience_id": "task_000001", "trigger": "T", "recommended_action": "A"}
+            ],
+            "step_experiences": [
+                {"experience_id": "step_000001", "trigger": "S", "recommended_action": "B"}
+            ],
+        }
+        tree.metrics = {"tree/mode": 1.0}
+        for depth in (1, 2, 3):
+            for j in range(2):  # 2 per bucket per step -> 4 per bucket across 2+ steps
+                uid = f"{prefix}_d{depth}_{j}"
+                st = SearchBranchState(uid, f"Question {uid}?", ["ans"], "nq")
+                lid, rid = f"L_{uid}", f"R_{uid}"
+                fid = f"fork_{uid}"
+                eid = ("task_000001",) if depth == 1 else ("step_000001",)
+                tree.nodes[lid] = DecisionNode(
+                    uid, lid, None, fid, depth, "L", st.clone(), (), "p", "n",
+                    action=f"<search>good {uid}</search>",
+                )
+                tree.nodes[rid] = DecisionNode(
+                    uid, rid, None, fid, depth, "R", st.clone(), eid, "p", "n",
+                    action=f"<search>bad {uid}</search>",
+                )
+                tree.forks[fid] = ForkRecord(fid, uid, depth, lid, rid, eid, (0.0,))
+                tree.leaves.append(Leaf(uid, f"leaf_{lid}", (lid,), 1.0, "nq"))
+                tree.leaves.append(Leaf(uid, f"leaf_{rid}", (rid,), 0.0, "nq"))
+        tree.evaluate_forks()
+        return tree
+
+    # Direct window selector test: 3 steps * 2 per depth = 6 per bucket -> exact 4-4-4 = 12
+    pool = []
+    for s in (1, 2, 3):
+        t = make_harmed_tree(s, f"s{s}")
+        pool.extend(trajectory_reflector_examples(t, k=100000, seed=s))
+    selected = select_window_reflector_contrasts(pool, k=12, per_bucket=4, seed=5)
+    assert len(selected) == 12
+    depths = [c["fork_depth"] for c in selected]
+    assert (depths.count(1), depths.count(2), depths.count(3)) == (4, 4, 4)
+
+    # Full manage_tree_experiences 5-step accumulation test
+    bank = {
+        "task_experiences": [
+            {"experience_id": "task_000001", "task_type": "general", "title": "T",
+             "principle": "A", "when_to_apply": "W", "retrieval_obs": "R", "utility": 0.0}
+        ],
+        "step_experiences": [
+            {"experience_id": "step_000001", "task_type": "general", "title": "S",
+             "principle": "B", "when_to_apply": "W", "retrieval_obs": "R", "utility": 0.0}
+        ],
+    }
+    memory = ExperienceMemory(load_initial_experiences=False, retrieval_mode="template")
+    memory.replace_experiences_keep_cache_incremental(bank)
+    captured = []
+
+    class DummyUpdater:
+        last_update_succeeded = True
+        last_failure_reason = None
+        last_classification_stats = {}
+
+        def analyze_failures(self, failed_trajectories, current_experiences):
+            captured.append(len(failed_trajectories))
+            return []
+
+    trainer = SimpleNamespace(
+        global_steps=1,
+        tree_evidence=QuestionEvidence(),
+        envs=SimpleNamespace(retrieval_memory=memory),
+        experience_updater=DummyUpdater(),
+        _sync_experiences_to_retrieval_server=lambda *args, **kwargs: None,
+        config=SimpleNamespace(
+            trainer=SimpleNamespace(default_local_dir=str(tmp_path)),
+            env=SimpleNamespace(
+                tree_experience=SimpleNamespace(
+                    utility_update_interval=5,
+                    utility_ema_beta=0.1,
+                    protect_recent_steps=0,
+                ),
+                experience_memory=SimpleNamespace(
+                    experience_update_base_url="http://localhost",
+                    experience_update_model="m",
+                    max_completion_tokens=512,
+                    token_limit_param="max_tokens",
+                    get=lambda k, d=None: {"eviction_enabled": False} if k == "management" else d,
+                ),
+            ),
+        ),
+    )
+
+    for s in (1, 2, 3, 4):
+        trainer.global_steps = s
+        m = manage_tree_experiences(trainer, make_harmed_tree(s, f"w{s}"))
+        assert m["reflector/window_accumulated"] == s * 6
+        assert len(trainer.tree_evidence.state["contrasts"]) == s * 6
+
+    trainer.global_steps = 5
+    m5 = manage_tree_experiences(trainer, make_harmed_tree(5, "w5"))
+    assert m5["reflector/tree_fork_candidates"] == 30
+    assert m5["reflector/submitted"] == 12
+    assert captured == [12]
+    assert trainer.tree_evidence.state["contrasts"] == []
+
+
+def test_split_step_similarity_threshold_local_and_remote(monkeypatch):
+    import numpy as np
+    from agent_system.memory.experience_memory import ExperienceMemory
+
+    bank = {
+        "version": 3,
+        "task_experiences": [
+            {
+                "experience_id": "task_1",
+                "task_type": "general",
+                "title": "Task rule",
+                "principle": "Do task.",
+                "when_to_apply": "Always.",
+                "retrieval_obs": "Task match",
+            }
+        ],
+        "step_experiences": [
+            {
+                "experience_id": "step_1",
+                "task_type": "general",
+                "title": "Step rule",
+                "principle": "Do step.",
+                "when_to_apply": "Midway.",
+                "retrieval_obs": "Step match",
+            }
+        ],
+    }
+
+    mem = ExperienceMemory(
+        experiences_json_path=None,
+        retrieval_mode="embedding",
+        load_initial_experiences=False,
+        similarity_threshold=0.40,
+        step_similarity_threshold=0.25,
+        retrieval_alpha=0.5,
+        retrieval_ucb_c=0.2,
+    )
+    mem.experiences = bank
+    mem._task_experience_embeddings_cache = {
+        "items": list(bank["task_experiences"]),
+        "embeddings": np.array([[1.0, 0.0]], dtype=np.float32),
+        "ids": ["task_1"],
+    }
+    mem._step_experience_embeddings_cache = {
+        "items": list(bank["step_experiences"]),
+        "embeddings": np.array([[1.0, 0.0]], dtype=np.float32),
+        "ids": ["step_1"],
+    }
+    # Cosine = 0.30 -> blocked for task (>=0.40), accepted for step (>=0.25)
+    monkeypatch.setattr(
+        mem,
+        "_encode_texts",
+        lambda texts, normalize_embeddings=True: np.tile(np.array([0.30, np.sqrt(1.0 - 0.30**2)], dtype=np.float32), (len(texts), 1)),
+    )
+    res_task = mem.retrieve_task_experiences_batch(["q1"], top_k=4, semantic_candidate_k=4)
+    res_step = mem.retrieve_step_experiences_batch(["s1"], top_k=4, semantic_candidate_k=4)
+    assert res_task[0]["task_experiences"] == []
+    assert [x["experience_id"] for x in res_step[0]["step_experiences"]] == ["step_1"]
+
+    # Remote service post-filtering path should also honor split thresholds
+    mem._retrieval_service_urls = ["http://127.0.0.1:29700"]
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class _Session:
+        def post(self, url, json, timeout):
+            pool = json["pool"]
+            eid = "task_1" if pool == "task_experiences" else "step_1"
+            return _Resp({"result": [{pool: [{"experience_id": eid, "similarity": 0.30}], "query_text": json["queries"][0]}]})
+
+    monkeypatch.setattr(mem, "_get_http_session", lambda url: _Session())
+    rem_task = mem.retrieve_task_experiences_batch(["q1"], top_k=4, semantic_candidate_k=4)
+    rem_step = mem.retrieve_step_experiences_batch(["s1"], top_k=4, semantic_candidate_k=4)
+    assert rem_task[0]["task_experiences"] == []
+    assert [x["experience_id"] for x in rem_step[0]["step_experiences"]] == ["step_1"]
+
+
 
 
 

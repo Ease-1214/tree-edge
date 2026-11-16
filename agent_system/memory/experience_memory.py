@@ -170,6 +170,7 @@ class ExperienceMemory(BaseMemory):
         experience_text_for_retrieval: str = "full",
         load_initial_experiences: bool = True,
         similarity_threshold: Optional[float] = None,
+        step_similarity_threshold: Optional[float] = None,
         experience_retrieval_timeout: int = 60,
         experience_generation_mode: str = "task_step",
         retrieval_top_2k: Optional[int] = None,
@@ -220,6 +221,7 @@ class ExperienceMemory(BaseMemory):
             )
         self._experience_text_for_retrieval = experience_text_for_retrieval
         self.similarity_threshold = similarity_threshold
+        self.step_similarity_threshold = step_similarity_threshold
         self._retrieval_timeout = max(1, int(experience_retrieval_timeout))
         self.experience_generation_mode = (experience_generation_mode or "task_step").lower().strip()
         if self.experience_generation_mode not in ("task_only", "step_only", "task_step"):
@@ -1053,11 +1055,16 @@ class ExperienceMemory(BaseMemory):
         top_2k = min(top_2k, len(cache["items"]))
 
         out = []
+        pool_threshold = (
+            self.step_similarity_threshold
+            if pool_name == "step_experiences" and self.step_similarity_threshold is not None
+            else self.similarity_threshold
+        )
         for j, query in enumerate(query_texts):
             s = np.asarray(sims[:, j]).ravel()
             idx_2k = np.lexsort((-np.arange(len(s)), -s))[:top_2k].tolist()
-            if self.similarity_threshold is not None:
-                idx_2k = [i for i in idx_2k if float(s[int(i)]) >= self.similarity_threshold]
+            if pool_threshold is not None:
+                idx_2k = [i for i in idx_2k if float(s[int(i)]) >= pool_threshold]
             if self._retrieval_alpha is not None:
                 idx_final = self._apply_simutil_ucb(pool_name, idx_2k, s, top_k)
             else:
@@ -1067,7 +1074,7 @@ class ExperienceMemory(BaseMemory):
                 sk = dict(cache["items"][int(i)])
                 sk["similarity"] = float(s[int(i)])
                 sk.update(self._get_experience_ranking_meta(pool_name, int(i), float(s[int(i)])))
-                if self.similarity_threshold is None or sk["similarity"] >= self.similarity_threshold:
+                if pool_threshold is None or sk["similarity"] >= pool_threshold:
                     experiences.append(sk)
             out.append(
                 {
@@ -1374,12 +1381,17 @@ class ExperienceMemory(BaseMemory):
                 experience_id = self._experience_identifier(experience)
                 if experience_id:
                     experience_id_to_idx[experience_id] = idx
+            pool_threshold = (
+                self.step_similarity_threshold
+                if pool_key == "step_experiences" and self.step_similarity_threshold is not None
+                else self.similarity_threshold
+            )
             for item in out:
                 experiences = list(item.get(pool_key, []) or [])
-                if self.similarity_threshold is not None:
+                if pool_threshold is not None:
                     experiences = [
                         sk for sk in experiences
-                        if sk.get("similarity") is not None and float(sk.get("similarity")) >= self.similarity_threshold
+                        if sk.get("similarity") is not None and float(sk.get("similarity")) >= pool_threshold
                     ]
                 for sk in experiences:
                     sid = sk.get("experience_id") or sk.get("experience_id")

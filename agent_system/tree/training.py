@@ -97,7 +97,15 @@ def manage_tree_experiences(trainer, tree):
     exposure_counts = tree_exposure_counts(tree)
     exposed = apply_exposure_counts(memory.experiences, exposure_counts, step)
     evidence.record(tree.fork_credits())
-    evidence.state["contrasts"] = []
+    step_contrasts = trajectory_reflector_examples(
+        tree, k=100000, seed=step, zero_success_quota=0, sampling="random"
+    )
+    window_contrasts = list(evidence.state.get("contrasts") or [])
+    for item in step_contrasts:
+        item_copy = dict(item)
+        item_copy["step"] = step
+        window_contrasts.append(item_copy)
+    evidence.state["contrasts"] = window_contrasts
     metrics = dict(
         tree.metrics,
         **{
@@ -112,6 +120,7 @@ def manage_tree_experiences(trainer, tree):
             "reflector/added_task": 0,
             "reflector/added_step": 0,
             "reflector/skip_reason": 3,
+            "reflector/window_accumulated": len(window_contrasts),
             **{f"reflector/classification_{stat}": 0.0 for stat in (
                 "submitted", "accepted", "rejected", "ambiguous",
                 "failed", "invalid_type_dropped",
@@ -137,14 +146,13 @@ def manage_tree_experiences(trainer, tree):
     metrics["bank/utility_question_groups"] = sum(
         int(update["group_count"]) for update in updates
     )
-    # T71: retain EXACTLY the same Fork eligibility filters; sample randomly
-    # from ALL eligible, distinct-question Forks using this Step as the seed.
-    # No LLM preselection and no ranking-based top-40 truncation.
-    contrast_pool = trajectory_reflector_examples(
-        tree, k=100000, seed=step, zero_success_quota=0, sampling="random"
+    from agent_system.tree.reflector_selection_v3 import select_window_reflector_contrasts
+
+    metrics["reflector/tree_fork_candidates"] = len(window_contrasts)
+    contrasts = select_window_reflector_contrasts(
+        window_contrasts, k=12, per_bucket=4, seed=step
     )
-    metrics["reflector/tree_fork_candidates"] = len(contrast_pool)
-    contrasts = contrast_pool[:10]
+    evidence.state["contrasts"] = []
     metrics["reflector/skip_reason"] = 0 if contrasts else 1
     if contrasts:
         metrics["reflector/submitted"] = len(contrasts)

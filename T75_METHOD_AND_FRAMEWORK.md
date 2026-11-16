@@ -10,7 +10,7 @@
 * **设计痛点**：在单条轨迹中直接塞入检索到的经验（如原版 EDGE / SkillRL），无法区分“模型本来就能答对”与“经验真正起效”；一旦经验有误或冲突，还会直接污染主干梯度。
 * **Tree-EDGE 做法**：
   1. 每题先采样 $N=4$ 条无经验的 **Natural 主干轨迹**（对应部署时不带经验的真实泛化条件，指标 `1_eval/train_natural_pass_rate`）。
-  2. 当 Natural 主干未全部成功时，在关键决策点构造受控分叉（Fork）：
+  2. 当 Natural 主干至多成功 1 条（`pass_counts <= 1`）时，在关键决策点构造受控分叉（Fork）：
      * **Left 分支**：不注入当前轮次的新经验；
      * **Right 分支**：注入当前轮次检索出的 **唯一最优（Top-1）经验**；
      * `fork_depth == 1`（开局第一轮搜索前）仅检索并注入 **Task 级经验**；`fork_depth >= 2`（拿到检索片段后的中途步）仅检索并注入 **Step 级经验**。
@@ -22,15 +22,15 @@
      * $\Delta(f) > 0$：经验起正作用 $\rightarrow$ 给该经验正效用反馈，并触发 **OPSD 自蒸馏**；
      * $\Delta(f) < 0$：经验起负作用或误导 $\rightarrow$ 给该经验负效用反馈，并将该分叉送入 **Reflector 反思器** 提取新经验。
 
-### 2. V3 双池经验库、状态摘要检索与 `0.4` 相似度门控
+### 2. V3 双池经验库、状态摘要检索与分池 `0.3` 相似度门控
 * **双池结构（`state_aware_experiences_v2.json`）**：
   * 彻底清理了早期混入的 ALFWorld 经验；
   * 拆分为独立的 `task_experiences`（初始 11 条）与 `step_experiences`（初始 13 条）；
   * 统一规范为 11 类 Search `task_type`：`general`、`direct_retrieval`、`entity_attribute_lookup`、`multi_hop_reasoning`、`comparison`、`temporal`、`numeric`、`list_intersection`、`source_identification`、`location_chain`、`answer_normalization`。
-* **初筛 + UCB 重排 + Top-1 注入**：
-  * **Query 构造**：Task 级仅使用初始问题；Step 级使用 `build_step_retrieval_query()` 提取结构化状态摘要（问题 + 已执行查询 + 最新检索结果关键片段）。
-  * **0.4 相似度硬门槛**：使用 `Qwen3-Embedding-0.6B`（默认通过 `http://127.0.0.1:29700` 调用 248 共享服务，亦可本地加载）计算余弦相似度，**先过滤掉相似度 `< 0.4` 的候选**（若全部低于 `0.4`，直接跳过本次分叉，绝不强行注入无关经验）。
-  * **UCB 重排选 Top-1**：在通过 `0.4` 门槛的候选中（候选池上限 12），结合相似度与历史效用 UCB 选出 **Top-1** 注入，避免多条经验相互冲突。
+* **初筛 + 温和 UCB 重排 + Top-1 注入**：
+  * **Query 构造**：Task 级仅使用初始问题；Step 级使用 `build_step_retrieval_query()` 构造纯本地确定性状态摘要（可观测状态诊断 + 标题 + 160 字 Excerpt，去除稀释语义的原题与步数模板）。
+  * **分池 `0.3` 相似度门槛**：使用 `Qwen3-Embedding-0.6B`（默认通过 `http://127.0.0.1:29700` 调用 248 共享服务，亦可本地加载）计算余弦相似度，分别使用 `similarity_threshold=0.3`（Task）和 `step_similarity_threshold=0.3`（Step）过滤低相关候选（若全部低于门槛，直接跳过本次分叉，绝不强行注入无关经验）。
+  * **UCB 重排选 Top-1**：在通过门槛的候选中（候选池上限 12），以 `retrieval_alpha=0.5, retrieval_ucb_c=0.2` 平衡相似度、历史效用与温和探索，选出 **Top-1** 注入，避免多条经验相互冲突。
 
 ### 3. GRPO 组内优势与格式惩罚解耦
 * **设计痛点**：遇到难题时模型易在 `<think>` 中长篇推理直至超出 500 tokens 被截断（`valid = False`）。若先对 `valid = False` 扣分再做 GRPO 组内标准化，会导致同组“格式合法但答错（reward=0）”的叶子获得**正优势**，变相鼓励模型乱猜短答案。
@@ -53,9 +53,10 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
   * `sft_weight = float(leaf.reward == 1 and node.valid)`：即使整条轨迹最终在后续轮次被救回（`leaf.reward == 1`），其中任何 `valid == False` 的截断轮次也绝不参与 SFT（防止把坏格式蒸馏进模型）。
 
 ### 5. Reflector 反思器闭环、效用更新与淘汰机制
-* **素材筛选（`trajectory_reflector_examples`）**：
-  * 仅选 $\Delta(f) < 0$ 的有效分叉；
-  * 按 `depth == 1`（Task 层）与 `depth >= 2`（Step 层）分层分桶抽样（每桶最多 4 个，总计最多 10 个案例）；
+* **素材筛选（`trajectory_reflector_examples` & `select_window_reflector_contrasts`）**：
+  * 仅选 $\Delta(f) < 0$ 且满足“Left 至少 1 条成功、Right 子树全失败（`max(left)==1, max(right)==0`）”的高置信分叉；
+  * **完整 5 步窗口累积**：窗口内每步收集并持久化候选对比对，在每 5 步触发反思时对整个 5 步累积池按问题去重后分桶抽样；
+  * 按 `depth == 1`、`depth == 2`、`depth >= 3` 分 3 桶分层抽样（每桶最多 4 个，缺桶顺延补齐，总计最多 **12 个**案例）；
   * 同一分叉内优先挑选后续经验干扰最少的成功叶子。
 * **单次 LLM 提取 + 反重复 + `0.85` 向量去重**：
   * 默认每窗口仅调 **1 次** `gpt-6.1-sol`（`ENABLE_EXPERIENCE_TYPE_VALIDATION=0`，每窗口最多新增 5 条，宁缺毋滥）；
@@ -98,7 +99,7 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
 | 模块 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | **树核心逻辑** | `agent_system/tree/core.py` | `TreeRollout`、递归 `evaluate_forks()`、GRPO 解耦优势、`sft_weight`、分层分桶 `trajectory_reflector_examples()` |
-| **树执行与打包** | `agent_system/tree/runner.py` | Natural 主干与条件分叉 rollout、状态摘要 Query、`0.4` 检索门控、`pack_training_rows()` |
+| **树执行与打包** | `agent_system/tree/runner.py` | Natural 主干与条件分叉 rollout、确定性状态摘要 Query、分叉与 `pack_training_rows()` |
 | **经验更新编排** | `agent_system/tree/training.py` | `write_new_experiences()`、窗口效用 EMA 更新与负效用/容量淘汰 |
 | **W&B 6 面板指标** | `agent_system/tree/metrics.py` | `CLEAN_WANDB_PANELS` 与 `build_clean_wandb_metrics()` |
 | **双池经验库** | `agent_system/memory/experience_memory.py` | V3 双池读写、`Qwen3-Embedding-0.6B` 向量检索、`0.85` 入库去重 |

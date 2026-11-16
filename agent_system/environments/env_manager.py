@@ -45,6 +45,7 @@ def _experience_memory_kwargs(som_cfg):
         "experience_text_for_retrieval": som_cfg.get('experience_text_for_retrieval', 'full'),
         "load_initial_experiences": load_initial,
         "similarity_threshold": som_cfg.get('similarity_threshold', None),
+        "step_similarity_threshold": som_cfg.get('step_similarity_threshold', None),
         "experience_retrieval_timeout": som_cfg.get('experience_retrieval_timeout', 60),
         "experience_generation_mode": som_cfg.get('experience_generation_mode', 'task_step'),
         "retrieval_top_2k": mgmt_cfg.get('retrieval_top_2k', som_cfg.get('retrieval_top_2k', None)),

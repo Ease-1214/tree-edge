@@ -78,6 +78,83 @@ def _paired_leaves(tree, audit, leaves):
     return pairs[0], lrate, rrate
 
 
+def _stratified_bucket_select(deduped, *, k=12, per_bucket=4):
+    """Select up to k candidates stratified across depth 1, 2, >=3 (up to per_bucket each),
+    then backfill remaining slots up to k from unused ranked candidates."""
+    buckets = {1: [], 2: [], 3: []}
+    for c in deduped:
+        depth = int(c.get("fork_depth") or 1)
+        b_idx = 1 if depth == 1 else (2 if depth == 2 else 3)
+        buckets[b_idx].append(c)
+    for b_idx in (1, 2, 3):
+        buckets[b_idx].sort(key=lambda c: c["score"], reverse=True)
+
+    selected = []
+    for round_idx in range(per_bucket):
+        for b_idx in (1, 2, 3):
+            if round_idx < len(buckets[b_idx]) and len(selected) < k:
+                selected.append(buckets[b_idx][round_idx])
+    if len(selected) < k:
+        selected_ids = {c["fork_id"] for c in selected}
+        for c in deduped:
+            if len(selected) >= k:
+                break
+            if c["fork_id"] not in selected_ids:
+                selected.append(c)
+                selected_ids.add(c["fork_id"])
+    return selected
+
+
+def select_window_reflector_contrasts(candidates, *, k=12, per_bucket=4, seed=0):
+    """Deduplicate and stratified-select up to k contrasts accumulated across a multi-step window."""
+    if not candidates or k <= 0:
+        return []
+    rng = random.Random(seed)
+    ranked = []
+    for item in candidates:
+        left_action = str(item.get("left_action") or "")
+        right_action = str(item.get("right_action") or "")
+        difference = _action_difference(left_action, right_action)
+        if difference is None:
+            difference = 0.0
+        lrate = float(item.get("left_subtree_rate") or 0.0)
+        rrate = float(item.get("right_subtree_rate") or 0.0)
+        if rrate >= lrate:
+            continue
+        action_family = "/".join(sorted([
+            normalize_action(left_action)[0],
+            normalize_action(right_action)[0],
+        ]))
+        score = (
+            int(action_family == "search/search"),
+            round(lrate - rrate, 5),
+            round(difference, 5),
+            rng.random(),
+        )
+        ranked.append({
+            "fork_id": str(item.get("fork_id") or ""),
+            "fork_depth": int(item.get("fork_depth") or 1),
+            "question_key": (
+                str(item.get("data_source") or ""),
+                str(item.get("task") or "").strip().casefold(),
+            ),
+            "score": score,
+            "item": item,
+        })
+    ranked.sort(key=lambda c: c["score"], reverse=True)
+    deduped = []
+    seen_forks = set()
+    seen_questions = set()
+    for c in ranked:
+        if c["fork_id"] in seen_forks or c["question_key"] in seen_questions:
+            continue
+        seen_forks.add(c["fork_id"])
+        seen_questions.add(c["question_key"])
+        deduped.append(c)
+    selected = _stratified_bucket_select(deduped, k=k, per_bucket=per_bucket)
+    return [c["item"] for c in selected]
+
+
 def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling="ranked"):
     """Select distinct-question harmful forks (delta < 0) via stratified depth bucketing.
 
@@ -125,7 +202,7 @@ def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling
             rng.random(),
         )
         raw_candidates.append(dict(
-            score=score, uid=lnode.uid, audit=audit,
+            score=score, uid=lnode.uid, audit=audit, fork_id=audit["fork_id"],
             action_distinction=difference,
             action_family=action_family,
             success=success, failure=failure, root=lnode.depth == 1,
@@ -149,28 +226,7 @@ def select_reflector_forks(tree, *, k=10, seed=0, zero_success_quota=0, sampling
         seen_questions.add(question_key)
         deduped.append(c)
 
-    # Stratified depth bucketing: Bucket 1 (depth==1), Bucket 2 (depth==2), Bucket 3 (depth>=3)
-    buckets = {1: [], 2: [], 3: []}
-    for c in deduped:
-        b_idx = 1 if c["fork_depth"] == 1 else (2 if c["fork_depth"] == 2 else 3)
-        buckets[b_idx].append(c)
-    for b_idx in (1, 2, 3):
-        buckets[b_idx].sort(key=lambda c: c["score"], reverse=True)
-
-    per_bucket = 4
-    selected = []
-    for round_idx in range(per_bucket):
-        for b_idx in (1, 2, 3):
-            if round_idx < len(buckets[b_idx]) and len(selected) < k:
-                selected.append(buckets[b_idx][round_idx])
-    if len(selected) < k:
-        selected_ids = {c["audit"]["fork_id"] for c in selected}
-        for c in deduped:
-            if len(selected) >= k:
-                break
-            if c["audit"]["fork_id"] not in selected_ids:
-                selected.append(c)
-                selected_ids.add(c["audit"]["fork_id"])
+    selected = _stratified_bucket_select(deduped, k=k, per_bucket=4)
 
     result = []
     for c in selected:

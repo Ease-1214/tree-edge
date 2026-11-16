@@ -439,11 +439,11 @@ def _choose_single_fork_experience(payload, pool_name, candidate_limit):
 
 
 def build_step_retrieval_query(state, max_steps=4):
-    """Build a concise state summary for step-level experience retrieval.
+    """Build a deterministic state-diagnostic summary for step-level retrieval.
 
-    Instead of passing thousands of characters of raw Wikipedia passages that
-    dilute semantic embeddings, summarize the question, current search step,
-    previous search queries, and condensed latest observation state.
+    Avoids diluting observation-state embeddings with the raw question and verbose
+    turn-counter boilerplate; emits factual observable status cues, snippet titles,
+    and a concise 160-character excerpt aligned with step retrieval_obs semantics.
     """
     prev_queries = []
     for action, _ in (state.history or []):
@@ -451,26 +451,49 @@ def build_step_retrieval_query(state, max_steps=4):
         if m and m[-1].strip():
             prev_queries.append(m[-1].strip())
     step_num = int(state.turns or 0) + 1
-    remaining = max(0, int(max_steps) - int(state.turns or 0))
     raw_obs = str(state.last_observation or "")
+    titles = [t.strip() for t in re.findall(r"Doc\s+\d+\(Title:\s*((?:[^()]|\([^)]*\))+)\)", raw_obs) if t.strip()]
     obs_clean = re.sub(r"</?information>", " ", raw_obs, flags=re.I)
+    obs_clean = re.sub(r"Doc\s+\d+\((?:[^()]|\([^)]*\))*\)\s*", "", obs_clean)
     obs_clean = re.sub(r"\s+", " ", obs_clean).strip()
 
-    if len(prev_queries) >= 2 and prev_queries[-1].casefold() == prev_queries[-2].casefold():
-        obs_summary = f"Repeated search query '{prev_queries[-1]}'; duplicate results. {obs_clean[:220]}"
-    elif not obs_clean or "no results" in obs_clean.lower() or "no matching" in obs_clean.lower():
-        obs_summary = "No matching search results returned."
-    else:
-        obs_summary = obs_clean[:280]
+    q_low = str(state.question or "").lower()
+    obs_low = obs_clean.lower()
+    is_empty = (not obs_clean) or ("no matching" in obs_low) or ("no results" in obs_low)
+    is_repeat = len(prev_queries) >= 2 and prev_queries[-1].casefold() == prev_queries[-2].casefold()
+    is_long_q = bool(prev_queries) and (len(prev_queries[-1].split()) >= 9 or "?" in prev_queries[-1])
 
-    parts = [
-        f"Question: {state.question}",
-        f"Search progress: step {step_num} of {max_steps} ({remaining} step(s) remaining).",
-    ]
-    if prev_queries:
-        parts.append("Previous search queries: " + " | ".join(prev_queries[-3:]))
-    parts.append(f"Current observation: {obs_summary}")
-    return "\n".join(parts)
+    first_title_tokens = {
+        next((w for w in re.findall(r"[a-z0-9]+", t.lower()) if w not in ("the", "a", "an")), "")
+        for t in titles
+    } - {""}
+
+    cues = []
+    if is_empty:
+        cues.append("Observation status: no matching results returned, query missed.")
+    elif is_repeat:
+        cues.append("Observation status: repeated identical search query returning duplicate passages.")
+    elif is_long_q:
+        cues.append("Observation status: overly long multi-clause query returned unfocused or weakly relevant passage.")
+    elif step_num >= int(max_steps):
+        cues.append(f"Observation status: final search budget turn ({step_num}/{int(max_steps)}) with only partial evidence so far.")
+    elif len(titles) >= 2 and len(first_title_tokens) == 1:
+        cues.append("Observation status: multiple candidate people, films, or places share a similar name across snippets.")
+    elif re.search(r"\b(first|older|earlier|younger|larger|smaller|more|less|both|same|between)\b", q_low):
+        cues.append("Observation status: comparison question with evidence retrieved for one side while the second entity remains unverified.")
+    elif len(re.findall(r"\b\d[\d,\.]*\b", obs_clean)) >= 2 and re.search(r"\b(population|when|year|how many|how long|much|age|date)\b", q_low):
+        cues.append("Observation status: quantitative snippets with multiple numbers, units, and dates.")
+    elif step_num == 2:
+        cues.append("Observation status: first search returned an entity or partial lead, next hop or missing attribute still needed.")
+    else:
+        cues.append(f"Observation status: step {step_num} returned candidate passages.")
+
+    if titles:
+        cues.append("Titles: " + ", ".join(titles[:3]) + ".")
+    summary = " ".join(cues)
+    if obs_clean and not is_empty:
+        summary += f" Excerpt: {obs_clean[:160]}"
+    return summary
 
 
 def tree_multi_turn_loop(collector, gen_batch, actor, manager):
