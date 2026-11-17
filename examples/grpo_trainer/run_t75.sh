@@ -263,7 +263,7 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   env.experience_memory.max_new_experiences=5 \
   env.experience_memory.management.retrieval_alpha=0.5 \
   env.experience_memory.management.retrieval_ucb_c=0.2 \
-  env.tree_experience.utility_ema_beta=0.1 \
+  env.tree_experience.utility_ema_beta=0.2 \
   env.tree_experience.utility_update_interval=5 \
   env.experience_memory.management.eviction_utility_threshold=-0.05 \
   env.experience_memory.management.eviction_min_exposures=20 \
