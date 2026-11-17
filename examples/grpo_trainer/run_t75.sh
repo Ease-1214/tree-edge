@@ -190,6 +190,25 @@ export PERF_QUESTIONS=${PERF_QUESTIONS:-256}
 export PERF_STEPS=${PERF_STEPS:-200}
 
 export WANDB_MODE=${WANDB_MODE:-online}
+if [[ "$WANDB_MODE" != "offline" && -z "${T062_HTTP_PROXY:-}" ]]; then
+  _wandb_proxy=""
+  for _cand in "http://127.0.0.1:29662" "http://127.0.0.1:29790" "http://127.0.0.1:7890"; do
+    _code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 --proxy "$_cand" https://api.wandb.ai/ 2>/dev/null || echo "000")
+    if [[ "$_code" == "200" || "$_code" == "301" || "$_code" == "302" || "$_code" == "404" ]]; then
+      _wandb_proxy="$_cand"
+      break
+    fi
+  done
+  if [[ -n "$_wandb_proxy" ]]; then
+    export T062_HTTP_PROXY="$_wandb_proxy"
+  else
+    _direct_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 https://api.wandb.ai/ 2>/dev/null || echo "000")
+    if [[ "$_direct_code" != "200" && "$_direct_code" != "404" ]]; then
+      export WANDB_MODE=offline
+      echo "[T75] No working W&B proxy found; falling back to WANDB_MODE=offline" >&2
+    fi
+  fi
+fi
 export T062_HTTP_PROXY=${T062_HTTP_PROXY:-http://127.0.0.1:29662}
 if [[ -z "${WANDB_BASE_URL:-}" && -f "$HOME/.netrc" ]]; then
   if ! grep -q "api\.forge\.coreweave\.com" "$HOME/.netrc" && grep -q "api\.wandb\.ai" "$HOME/.netrc"; then
