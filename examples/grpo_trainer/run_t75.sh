@@ -192,7 +192,7 @@ export PERF_STEPS=${PERF_STEPS:-200}
 export WANDB_MODE=${WANDB_MODE:-online}
 if [[ "$WANDB_MODE" != "offline" && -z "${T062_HTTP_PROXY:-}" ]]; then
   _wandb_proxy=""
-  for _cand in "http://127.0.0.1:7890" "http://127.0.0.1:29662"; do
+  for _cand in "http://127.0.0.1:29662" "http://127.0.0.1:29790" "http://127.0.0.1:7890"; do
     _code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 --proxy "$_cand" https://api.wandb.ai/ 2>/dev/null || echo "000")
     if [[ "$_code" == "200" || "$_code" == "301" || "$_code" == "302" || "$_code" == "404" ]]; then
       _wandb_proxy="$_cand"
