@@ -594,6 +594,8 @@ def test_reflector_prompt_trims_long_multi_turn_contrasts_without_value_error():
         })
     prompt = updater._build_search_analysis_prompt(contrasts, {"task_experiences": [], "step_experiences": []}, 1)
     assert "Example 12:" in prompt
+    assert "STRICT ANTI-DUPLICATION:" in prompt
+    assert "do NOT skip a concrete, narrower failure pattern" in prompt
     assert len(prompt) <= 180000
 
 
