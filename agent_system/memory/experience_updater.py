@@ -452,21 +452,23 @@ Return ONLY a JSON array of experience objects.
                     })
                 else:
                     compact_history.append(str(h)[:300])
-            anchor_obs = str(traj.get("anchor_obs") or "")[:800]
+            anchor_obs = str(traj.get("anchor_obs") or "")[:500]
             # Only show post-fork turns (depth >= fork_depth) in each branch to avoid
             # repeating the identical pre-fork search history three times.
             success_turns = [
-                {"depth": t.get("depth"), "action": (t.get("action") or "")[:400],
-                 "observation": (t.get("observation") or "")[:500]}
+                {"depth": t.get("depth"), "action": (t.get("action") or "")[:300],
+                 "observation": (t.get("observation") or "")[:350]}
                 for t in (traj.get("success_turns") or [])
                 if int(t.get("depth") or fork_depth) >= fork_depth
             ]
             failed_turns = [
-                {"depth": t.get("depth"), "action": (t.get("action") or "")[:400],
-                 "observation": (t.get("observation") or "")[:500]}
+                {"depth": t.get("depth"), "action": (t.get("action") or "")[:300],
+                 "observation": (t.get("observation") or "")[:350]}
                 for t in (traj.get("failed_turns") or [])
                 if int(t.get("depth") or fork_depth) >= fork_depth
             ]
+            left_action = str(pair["without_experience"].get("action", "") or "")[:800]
+            right_action = str(pair["with_experience"].get("action", "") or "")[:800]
             return "\n".join([
                 f"\nExample {idx}:",
                 f"Question: {traj.get('task', '')}",
@@ -478,8 +480,8 @@ Return ONLY a JSON array of experience objects.
                 "Successful trajectory: " + json.dumps(success_turns, ensure_ascii=False),
                 "Failed trajectory: " + json.dumps(failed_turns, ensure_ascii=False),
                 "New experiences injected into RIGHT at this fork (harmful/misleading in this state): " + json.dumps(added_exps, ensure_ascii=False),
-                f"LEFT action (without new experience, succeeded): {pair['without_experience'].get('action', '')}",
-                f"RIGHT action (with new experience, failed): {pair['with_experience'].get('action', '')}",
+                f"LEFT action (without new experience, succeeded): {left_action}",
+                f"RIGHT action (with new experience, failed): {right_action}",
                 f"LEFT subtree success: {pair['without_experience'].get('successes')}/{pair['without_experience'].get('total')} = {pair['without_experience'].get('score')}",
                 f"RIGHT subtree success: {pair['with_experience'].get('successes')}/{pair['with_experience'].get('total')} = {pair['with_experience'].get('score')}",
                 f"Delta: {traj['delta']}; experience {traj['effect']}",
@@ -527,7 +529,8 @@ Return ONLY a JSON array of experience objects.
         types = ", ".join(self.SEARCH_TASK_TYPES)
         existing_text = "\n".join(existing) if existing else "(none)"
 
-        prompt = f"""You are maintaining an experience bank for a search agent that answers open-domain questions.
+        def _render(ex_list):
+            return f"""You are maintaining an experience bank for a search agent that answers open-domain questions.
 The agent works in turns: it reasons inside <think>...</think>, issues a search engine query inside <search>...</search>, reads the returned passages inside <information>...</information>, and finally answers inside <answer>...</answer>. A rollout is scored 1 if the final answer matches the reference and 0 otherwise.
 
 Each example below is a controlled fork at one identical search state on the SAME question: LEFT omitted this turn's newly retrieved experience and succeeded, while RIGHT received the listed experience and failed (Delta < 0). Thus the injected experience either misled the agent (e.g., over-searching, wrong disambiguation, or premature/wrong query focus) or failed to provide the strategy needed at that state.
@@ -546,7 +549,7 @@ Rules (strict):
    - "step": applicability (trigger, state_cues, and retrieval_text) depends on the mid-search state after reading retrieved snippets or search history.
 
 EXAMPLES:
-{''.join(examples)}
+{''.join(ex_list)}
 EXISTING EXPERIENCES:
 {existing_text}
 
@@ -564,6 +567,13 @@ Generate 0-{self.max_new_experiences_per_update} experiences. Each item must con
 
 Return ONLY a JSON array of experience objects.
 """
+
+        prompt = _render(examples)
+        # Keep room for CLASSIFICATION_GUIDANCE appended by the caller; trim
+        # trailing examples gracefully before hitting the 60k hard limit.
+        while len(examples) > 1 and len(prompt) > 56000:
+            examples.pop()
+            prompt = _render(examples)
         if len(prompt) > 60000:
             raise ValueError("Reflector prompt exceeds 60000 characters")
         self.last_prompt_chars = len(prompt)

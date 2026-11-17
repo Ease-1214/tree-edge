@@ -564,6 +564,39 @@ def test_split_step_similarity_threshold_local_and_remote(monkeypatch):
     assert [x["experience_id"] for x in rem_step[0]["step_experiences"]] == ["step_1"]
 
 
+def test_reflector_prompt_trims_long_multi_turn_contrasts_without_value_error():
+    from agent_system.memory.experience_updater import ExperienceUpdater
+
+    updater = ExperienceUpdater(
+        api_key="dummy-key",
+        base_url="http://127.0.0.1:29663/v1",
+        model="gpt-6.1-sol",
+    )
+    long_obs = "<information>" + ("long passage " * 120) + "</information>"
+    long_act = "<think>" + ("reasoning " * 250) + "</think><search>q</search>"
+    contrasts = []
+    for i in range(12):
+        contrasts.append({
+            "fork_id": f"s5:q{i}:fork:L",
+            "fork_depth": 2 + (i % 2),
+            "task": f"Question {i}?",
+            "delta": -1.0,
+            "effect": "harmed",
+            "anchor_obs": long_obs,
+            "search_history": [(long_act, long_obs)],
+            "added_experiences": ["step_000002"],
+            "success_turns": [{"depth": 2, "action": long_act, "observation": long_obs}],
+            "failed_turns": [{"depth": 2, "action": long_act, "observation": long_obs}],
+            "paired_rollout": {
+                "without_experience": {"action": long_act, "successes": 1, "total": 1, "score": 1.0},
+                "with_experience": {"action": long_act, "successes": 0, "total": 1, "score": 0.0, "experience_ids": ["step_000002"]},
+            },
+        })
+    prompt = updater._build_search_analysis_prompt(contrasts, {"task_experiences": [], "step_experiences": []}, 1)
+    assert len(prompt) <= 60000
+
+
+
 
 
 
