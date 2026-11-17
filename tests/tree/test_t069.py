@@ -47,7 +47,7 @@ def test_deadline_returns_without_waiting_for_slow_network():
 def test_prompt_failure_is_reported_without_network_call():
     writer=updater()
     writer._prompt_domain=lambda _: "search"
-    result=writer.analyze_failures([dict(task="x"*70000)],{})
+    result=writer.analyze_failures([dict(task="x"*190000)],{})
     assert result==[]
     assert not writer.last_update_succeeded
     assert writer.last_failure_reason=="prompt_ValueError"

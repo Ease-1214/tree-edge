@@ -452,23 +452,23 @@ Return ONLY a JSON array of experience objects.
                     })
                 else:
                     compact_history.append(str(h)[:300])
-            anchor_obs = str(traj.get("anchor_obs") or "")[:500]
+            anchor_obs = str(traj.get("anchor_obs") or "")[:800]
             # Only show post-fork turns (depth >= fork_depth) in each branch to avoid
             # repeating the identical pre-fork search history three times.
             success_turns = [
-                {"depth": t.get("depth"), "action": (t.get("action") or "")[:300],
-                 "observation": (t.get("observation") or "")[:350]}
+                {"depth": t.get("depth"), "action": (t.get("action") or "")[:400],
+                 "observation": (t.get("observation") or "")[:500]}
                 for t in (traj.get("success_turns") or [])
                 if int(t.get("depth") or fork_depth) >= fork_depth
             ]
             failed_turns = [
-                {"depth": t.get("depth"), "action": (t.get("action") or "")[:300],
-                 "observation": (t.get("observation") or "")[:350]}
+                {"depth": t.get("depth"), "action": (t.get("action") or "")[:400],
+                 "observation": (t.get("observation") or "")[:500]}
                 for t in (traj.get("failed_turns") or [])
                 if int(t.get("depth") or fork_depth) >= fork_depth
             ]
-            left_action = str(pair["without_experience"].get("action", "") or "")[:800]
-            right_action = str(pair["with_experience"].get("action", "") or "")[:800]
+            left_action = str(pair["without_experience"].get("action", "") or "")[:3000]
+            right_action = str(pair["with_experience"].get("action", "") or "")[:3000]
             return "\n".join([
                 f"\nExample {idx}:",
                 f"Question: {traj.get('task', '')}",
@@ -569,13 +569,8 @@ Return ONLY a JSON array of experience objects.
 """
 
         prompt = _render(examples)
-        # Keep room for CLASSIFICATION_GUIDANCE appended by the caller; trim
-        # trailing examples gracefully before hitting the 60k hard limit.
-        while len(examples) > 1 and len(prompt) > 56000:
-            examples.pop()
-            prompt = _render(examples)
-        if len(prompt) > 60000:
-            raise ValueError("Reflector prompt exceeds 60000 characters")
+        if len(prompt) > 180000:
+            raise ValueError("Reflector prompt exceeds 180000 characters")
         self.last_prompt_chars = len(prompt)
         return prompt
 
