@@ -7,7 +7,7 @@ ACTOR_RATIOS = (
     "actor/pg_clipfrac_lower", "actor/ppo_kl", "actor/kl_loss",
     "kd/weighted_loss_all_tokens", "kd/weighted_loss_active_tokens", "kd/active_token_rate",
     "kd/effective_weight_sum_over_N", "edge/distill_loss",
-    "edge/actor_active_row_fraction", "edge/teacher_topk_kl", "sft/loss_token_mean",
+    "edge/actor_active_row_fraction", "edge/teacher_topk_kl", "kd/student_mass", "sft/loss_token_mean",
 )
 GROUP_RATIOS = ("topk_kl", "student_mass", "logprob_gap", "logprob_gap_abs",
                 "mean_weight", "positive_adv_conflict_proxy", "negative_adv_conflict_proxy")
@@ -83,6 +83,8 @@ class ActorMetricTotals:
         if kl is None:
             return
         self.ratio("edge/teacher_topk_kl",(kl.detach() * active).sum(),tokens)
+        if mass is not None:
+            self.ratio("kd/student_mass",(mass.detach() * active).sum(),tokens)
         if not tree_batch:
             return
         direction = -(gradient.detach() * (topk_ids == data["responses"][:,:,None])).sum(-1)

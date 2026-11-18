@@ -274,6 +274,7 @@ exec bash examples/grpo_trainer/run_t062_perf.sh \
   env.tree_experience.protect_recent_steps=0 \
   env.tree_experience.dedup_shared_prefix=True \
   +env.tree_experience.dedup_batching=node_mixed \
+  +env.tree_experience.dedup_max_minibatches=${DEDUP_MAX_MINIBATCHES:-6} \
   env.experience_memory.update_frequency=5 \
   actor_rollout_ref.actor.success_sft.enable=True \
   actor_rollout_ref.actor.success_sft.coef=0.05 \

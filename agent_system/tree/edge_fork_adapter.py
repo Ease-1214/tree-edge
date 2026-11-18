@@ -18,7 +18,7 @@ def edge_search_examples_from_forks(selected_forks: List[Dict]) -> List[Dict]:
         left_rate = float(fork.get("left_subtree_rate") or 0)
         right_rate = float(fork.get("right_subtree_rate") or 0)
         delta = right_rate - left_rate
-        examples.append({
+        item_dict = {
             "task": fork.get("task", ""),
             "task_type": "unknown",
             "fork_id": fork["fork_id"],
@@ -54,5 +54,8 @@ def edge_search_examples_from_forks(selected_forks: List[Dict]) -> List[Dict]:
                     "experience_ids": fork.get("right_experience_ids") or [],
                 },
             },
-        })
+        }
+        if fork.get("reflector_version"):
+            item_dict["reflector_version"] = fork["reflector_version"]
+        examples.append(item_dict)
     return examples

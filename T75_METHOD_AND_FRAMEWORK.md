@@ -25,10 +25,10 @@
 ### 2. V3 双池经验库、状态摘要检索与分池 `0.3` 相似度门控
 * **双池结构（`state_aware_experiences_v2.json`）**：
   * 彻底清理了早期混入的 ALFWorld 经验；
-  * 拆分为独立的 `task_experiences`（初始 11 条）与 `step_experiences`（初始 13 条）；
+  * 拆分为独立的 `task_experiences`（初始 10 条，已移除纯格式冗余 `task_000001`）与 `step_experiences`（初始 13 条）；
   * 统一规范为 11 类 Search `task_type`：`general`、`direct_retrieval`、`entity_attribute_lookup`、`multi_hop_reasoning`、`comparison`、`temporal`、`numeric`、`list_intersection`、`source_identification`、`location_chain`、`answer_normalization`。
 * **初筛 + 温和 UCB 重排 + Top-1 注入**：
-  * **Query 构造**：Task 级仅使用初始问题；Step 级使用 `build_step_retrieval_query()` 构造纯本地确定性状态摘要（可观测状态诊断 + 标题 + 160 字 Excerpt，去除稀释语义的原题与步数模板）。
+  * **Query 构造**：Task 级仅使用初始问题；Step 级使用 `build_step_retrieval_query()` 构造纯本地确定性状态摘要（可观测状态诊断 + 标题 + `Doc 1..3` 各取前 100 字多文档均衡摘要，去除稀释语义的原题与步数模板）。
   * **分池 `0.3` 相似度门槛**：使用 `Qwen3-Embedding-0.6B`（默认通过 `http://127.0.0.1:29700` 调用 248 共享服务，亦可本地加载）计算余弦相似度，分别使用 `similarity_threshold=0.3`（Task）和 `step_similarity_threshold=0.3`（Step）过滤低相关候选（若全部低于门槛，直接跳过本次分叉，绝不强行注入无关经验）。
   * **UCB 重排选 Top-1**：在通过门槛的候选中（候选池上限 12），以 `retrieval_alpha=0.5, retrieval_ucb_c=0.2` 平衡相似度、历史效用与温和探索，选出 **Top-1** 注入，避免多条经验相互冲突。
 
@@ -38,7 +38,7 @@
   1. 先仅用原始正确性奖励 $r \in \{0, 1\}$ 计算组内标准化优势（且按节点被多少叶子共享做同步权重稀释，使提前答对与提前答错权重对称）；
   2. 标准化完成后，再对 `valid == False` 的节点单独扣除固定格式惩罚（`invalid_action_penalty_coef = 0.5`）。
 
-### 4. 三项损失协同：GRPO PG + OPSD（Top-20 Reverse KL）+ Success SFT
+### 4. 三项损失协同：GRPO PG + OPSD（21 维 `[Top-20, Rest]` Reverse KL）+ 非满分题 Success SFT
 总优化目标为：
 $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \mathcal{L}_{\text{OPSD}} + \lambda_{\text{SFT}} \mathcal{L}_{\text{SFT}}, \quad \lambda_{\text{OPSD}} = 0.05,\ \lambda_{\text{SFT}} = 0.05$$
 
@@ -47,10 +47,10 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
   * **Teacher 与 Student**：Teacher 为注入了经验 Prompt 的当前策略 $\pi_{\theta}(\cdot \mid s, e)$（`stop_grad`），Student 为同一状态下**不带经验**的策略 $\pi_{\theta}(\cdot \mid s)$，目标是把“有经验才做出的好动作分布”内化到无经验的模型参数中；
   * **权重**：直接乘以分叉优势 $\Delta(f)$（不乘右子树叶子数折扣，避免惩罚一锤定音快速成功的右分支）；
   * **为什么用 Top-20 Reverse KL（模式寻优 Mode-Seeking）**：
-    Forward KL $\text{KL}(\pi_T \parallel \pi_S)$ 会强迫无经验的 Student 去覆盖 Teacher 在长尾词表上的所有概率质量（mean-seeking，导致熵增和胡言乱语）；而 **Reverse KL $\text{KL}(\pi_S \parallel \pi_T)$（在 Top-20 token 截断归一化上计算）是 mode-seeking**，它只要求 Student 把概率集中到 Teacher 最确信的前 20 个高概率推理/搜索 token 上，同时极大节省了全词表 logits 显存开销；
+    Forward KL $\text{KL}(\pi_T \parallel \pi_S)$ 会强迫无经验的 Student 去覆盖 Teacher 在长尾词表上的所有概率质量（mean-seeking，导致熵增和胡言乱语）；而 **21 维分区精确 Reverse KL $\text{KL}_{21}(\pi_S \parallel \pi_T)$（在 `[Top-20, Rest]` 完备粗化划分上计算，利用寄存器内全词表 `logsumexp` 零显存构造第 21 维尾桶）是 mode-seeking**，既能将落在 Top-20 外的错误主峰拉回 Top-20 内，又能对齐 Top-20 内部相对分布，且零额外显存开销；
   * **为什么系数取 `0.05`（梯度占比 5%~30%）**：主干信号必须是环境真实奖励驱动的 $\mathcal{L}_{\text{PG}}$；OPSD 和 SFT 系数设为 `0.05`（按 active tokens 归一化）使其梯度范数稳定在 PG 梯度的 `5%~30%` 之间，既能辅助内化成功分叉与经验策略，又不会喧宾夺主掩盖 RL 探索。
-* **Success SFT 无效动作掩码**：
-  * `sft_weight = float(leaf.reward == 1 and node.valid)`：即使整条轨迹最终在后续轮次被救回（`leaf.reward == 1`），其中任何 `valid == False` 的截断轮次也绝不参与 SFT（防止把坏格式蒸馏进模型）。
+* **Success SFT（跳过全对零方差毕业题 + 无效动作掩码）**：
+  * `sft_weight = float(leaf.reward == 1 and node.valid and uid not in all_correct_uids)`：对齐 GRPO 零方差毕业条件，跳过整道题所有采样全部答对（`all_correct`）的已掌握简单题；保留 `0/4`（树救援）及 `1/4, 2/4, 3/4` 中所有自然采样与树采样的成功合法轮次（任何 `valid == False` 的截断轮次均不参与 SFT）。
 
 ### 5. Reflector 反思器闭环、效用更新与淘汰机制
 * **素材筛选（`trajectory_reflector_examples` & `select_window_reflector_contrasts`）**：
@@ -80,7 +80,7 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
 
 ### 2. Search API（训练与评测环境网页/文档检索）
 * **代码位置**：`agent_system/environments/env_package/search/third_party/skyrl_gym/tools/search.py`
-* **调用地址**：`POST http://127.0.0.1:29661/retrieve`（同样由 251 通过 SSH `-R` 映射至 31）
+* **调用地址**：`POST http://127.0.0.1:29661/retrieve`（由 248 服务器 `172.18.167.248:18125` 经 SSH `-R` 映射至 31/249，由 `watchdog_wandb_proxy.py` 自动守护）
 * **请求与返回格式**（`api_format="search_r1_batch"`，`topk=3`，`request_batch_size=128`，`timeout=60s`）：
   ```json
   // Request
@@ -89,22 +89,36 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
   {"result": [[{"contents": "..."}]]}
   ```
 
-### 3. 本地 Embedding 经验检索（无远程 HTTP 依赖）
-* **代码位置**：`agent_system/memory/experience_memory.py`
-* **加载方式**：进程内通过 `SentenceTransformer("/home/zehao/echo-collab/T061/assets/Qwen3-Embedding-0.6B", device="cuda:0")` 本地加载（`retrieval_mode="embedding"`）。
+### 3. Embedding 经验向量检索（默认 29700 远程零显存服务 + 本地回退）
+* **代码位置**：`agent_system/memory/experience_memory.py` (`_encode_remote` / `_encode_dynamic`)
+* **默认方式（零本地 GPU 显存开销）**：`run_t75.sh` 默认设置 `EDGE_EMBED_URL=http://127.0.0.1:29700`（由 248 服务器 `embedding_server.py` 托管 `Qwen3-Embedding-0.6B` 并经 SSH `-R` 映射至 31/249，`EDGE_CONTROLLER_GPUS=0`）。
+* **本地回退方式**：若清空 `EDGE_EMBED_URL=""`，则进程内通过 `SentenceTransformer("/home/zehao/echo-collab/T061/assets/Qwen3-Embedding-0.6B", device="cuda:0")` 本地加载。
+
+### 4. W&B 高可用代理隧道
+* **集群常驻通道（首选）**：`http://127.0.0.1:29662`（由 248 映射至 31/249，并由 248 上的 `/home/zehao/echo-collab/T062/wandb-import/watchdog_wandb_proxy.py` 每 60s 主动探测 `https://api.wandb.ai`，异常时毫秒级自动测速切换健康出口节点并守护 SSH 隧道）。
+* **开发机直通备份**：`http://127.0.0.1:29790`（用户 SSH 连接时自动 RemoteForward 映射，避开 `7890` 多用户端口冲突）。
 
 ---
 
-## 三、项目核心代码索引（Where）
+## 三、项目核心代码与文档索引（Where）
 
 | 模块 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| **树核心逻辑** | `agent_system/tree/core.py` | `TreeRollout`、递归 `evaluate_forks()`、GRPO 解耦优势、`sft_weight`、分层分桶 `trajectory_reflector_examples()` |
-| **树执行与打包** | `agent_system/tree/runner.py` | Natural 主干与条件分叉 rollout、确定性状态摘要 Query、分叉与 `pack_training_rows()` |
-| **经验更新编排** | `agent_system/tree/training.py` | `write_new_experiences()`、窗口效用 EMA 更新与负效用/容量淘汰 |
+| **树核心逻辑** | `agent_system/tree/core.py` | `TreeRollout`、递归 `evaluate_forks()`、GRPO 解耦优势、`QuestionEvidence` 效用窗口合并 |
+| **树执行与打包** | `agent_system/tree/runner.py` | Natural 主干与条件分叉 rollout、确定性状态摘要 `build_step_retrieval_query()`、`pack_training_rows()` |
+| **共享前缀去重分批** | `agent_system/tree/question_batches.py` | `node_mixed_plan()`、`prepare_dedup_batch()` 唯一节点聚合（`w_tok, A_pos, A_neg, sft_weight`） |
+| **树节点策略损失** | `agent_system/tree/dedup.py` | `weighted_node_policy_loss()` 去重节点正负优势分离裁剪 PPO 目标 |
+| **树自蒸馏损失** | `agent_system/tree/loss.py` | `tree_topk_loss()`（Top-20 Reverse KL，按有效 KD Token 归一化）与 `tree_kd_metrics()` |
+| **反思分桶选择器** | `agent_system/tree/reflector_selection_v3.py` | 5 步窗口候选去重与 3 深度桶分层抽样 `select_window_reflector_contrasts()` |
+| **反思格式适配器** | `agent_system/tree/edge_fork_adapter.py` | 将树分叉对比结构映射为 `ExperienceUpdater` 统一输入 Schema |
+| **经验生命周期编排** | `agent_system/tree/training.py` | `manage_tree_experiences()`、`write_new_experiences()`、Checkpoint 树状态精确保存/恢复 |
 | **W&B 6 面板指标** | `agent_system/tree/metrics.py` | `CLEAN_WANDB_PANELS` 与 `build_clean_wandb_metrics()` |
-| **双池经验库** | `agent_system/memory/experience_memory.py` | V3 双池读写、`Qwen3-Embedding-0.6B` 向量检索、`0.85` 入库去重 |
+| **双池经验库** | `agent_system/memory/experience_memory.py` | V3 双池读写、`29700` 向量检索、UCB 重排、`format_for_prompt()`、`0.85` 入库去重与淘汰 |
 | **反思器客户端** | `agent_system/memory/experience_updater.py` | 11 类 `SEARCH_TASK_TYPES`、反重复 Prompt、330s 超时、JSON 解析与后处理 |
-| **RL 训练器** | `verl/trainer/ppo/ray_trainer.py` | `RayPPOTrainer`、OPSD/SFT/PG 训练循环、6 面板 W&B 与 `step_metrics.jsonl` |
-| **统一启动入口** | `examples/grpo_trainer/run_t75.sh` | 支持 `GPU_PROFILE=2xa40 / 4x3090 / 8x3090 / auto` |
-| **闭环测试脚本** | `tools/test_t75_reflector_closed_loop.py` | 离线 + 在线（`--live`）Reflector 全链路验收工具 |
+| **分布式 Actor 更新** | `verl/workers/actor/dp_actor.py` | Response-only rmpad 前向、Active-only Teacher 蒸馏、去经验 SFT 与 `replica_sync` 全局分母同步 |
+| **RL 训练主循环** | `verl/trainer/ppo/ray_trainer.py` | `RayPPOTrainer.fit()`、Rollout $
+ightarrow$ 经验管理 $
+ightarrow$ `old_log_prob` $
+ightarrow$ `update_actor` 编排 |
+| **统一启动入口** | `examples/grpo_trainer/run_t75.sh` | 支持 `GPU_PROFILE=2xa40 / 4x3090 / 8x3090 / auto` 及 W&B 代理自动探测回退 |
+| **架构与接口手册** | `docs/T75_ARCHITECTURE_AND_INTERFACES.md` | 全链路数据流、核心类/Tensor/JSON 接口契约与历史文档归档索引 |

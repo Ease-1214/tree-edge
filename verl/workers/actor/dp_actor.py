@@ -82,10 +82,85 @@ def _build_padded_response_token_selection_ids(
     return padded_ids
 
 
+class _MemoryEfficientLogSumExp(torch.autograd.Function):
+    """Compute fp32 logsumexp over the vocabulary without storing an extra fp32 [N, V] tensor."""
+
+    @staticmethod
+    def forward(ctx, logits: torch.Tensor) -> torch.Tensor:
+        lse = torch.logsumexp(logits.float(), dim=-1)
+        ctx.save_for_backward(logits, lse)
+        return lse
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        logits, lse = ctx.saved_tensors
+        grad = torch.exp(logits.float() - lse.unsqueeze(-1)) * grad_output.float().unsqueeze(-1)
+        return grad.to(logits.dtype)
+
+
+def _memory_efficient_logsumexp(logits: torch.Tensor) -> torch.Tensor:
+    if logits.requires_grad:
+        return _MemoryEfficientLogSumExp.apply(logits)
+    return torch.logsumexp(logits.float(), dim=-1)
+
+
+def _active_training_row_mask(
+    batch_dict,
+    *,
+    tree_batch: bool = False,
+    dedup: bool = False,
+    edge_enabled: bool = False,
+    sft_enabled: bool = False,
+    path_tier: int = 2,
+):
+    """Identify rows with at least one non-zero gradient signal (PG, OPSD, or SFT)."""
+    if not tree_batch or os.environ.get("T75_SKIP_DEAD_ROWS", "1") == "0":
+        return None
+    if "responses" not in batch_dict:
+        return None
+    bsz = batch_dict["responses"].shape[0]
+    device = batch_dict["responses"].device
+    valid_row = (
+        ~batch_dict["is_padding_copy"].to(dtype=torch.bool, device=device)
+        if "is_padding_copy" in batch_dict
+        else torch.ones(bsz, dtype=torch.bool, device=device)
+    )
+    if dedup and "A_pos" in batch_dict and "A_neg" in batch_dict:
+        has_pg = (batch_dict["A_pos"] != 0) | (batch_dict["A_neg"] != 0)
+    elif "advantages" in batch_dict:
+        adv = batch_dict["advantages"]
+        has_pg = (adv != 0).any(dim=-1) if adv.dim() > 1 else (adv != 0)
+    elif "tree_advantage" in batch_dict:
+        has_pg = batch_dict["tree_advantage"] != 0
+    else:
+        return None
+    has_pg = has_pg.to(device=device, dtype=torch.bool)
+
+    if edge_enabled and "edge_distill_weight" in batch_dict:
+        kd_w = batch_dict["edge_distill_weight"].to(device=device)
+        if "kd_canonical" in batch_dict:
+            kd_w = kd_w * batch_dict["kd_canonical"].to(device=device)
+        if int(path_tier) == 1 and "kd_path_has_T" in batch_dict:
+            kd_w = kd_w * (~batch_dict["kd_path_has_T"].to(device=device, dtype=torch.bool))
+        has_kd = kd_w > 0
+    else:
+        has_kd = torch.zeros(bsz, dtype=torch.bool, device=device)
+
+    if sft_enabled and "sft_weight" in batch_dict:
+        has_sft = batch_dict["sft_weight"].to(device=device) > 0
+    else:
+        has_sft = torch.zeros(bsz, dtype=torch.bool, device=device)
+
+    return valid_row & (has_pg | has_kd | has_sft)
+
+
 class DataParallelPPOActor(BasePPOActor):
     def __init__(self, config, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
         self.actor_module = actor_module
         self.actor_optimizer = actor_optimizer
 
@@ -191,9 +266,11 @@ class DataParallelPPOActor(BasePPOActor):
                 sel_ids_kept = token_selection_ids[row_idx, resp_idx]
                 sel_logits_kept = logits.gather(dim=-1, index=sel_ids_kept)
 
-        if sel_logits_kept is not None and getattr(self, "_tree_monitoring", False):
+        if sel_logits_kept is not None:
+            lse_kept = _memory_efficient_logsumexp(logits)
+            self._last_selected_lse = torch.zeros((batch_size, response_length), dtype=torch.float32, device=device).index_put((row_idx, resp_idx), lse_kept)
             with torch.no_grad():
-                mass_kept = torch.exp(torch.logsumexp(sel_logits_kept.float(), -1) - torch.logsumexp(logits.float(), -1))
+                mass_kept = torch.exp(torch.logsumexp(sel_logits_kept.float(), -1) - lse_kept.detach()).clamp(0.0, 1.0)
                 self._last_selected_mass = torch.zeros((batch_size, response_length), device=device).index_put((row_idx, resp_idx), mass_kept)
 
         if calculate_log_probs:
@@ -395,7 +472,15 @@ class DataParallelPPOActor(BasePPOActor):
                     )
                     log_probs = full_log_probs.squeeze(-1)[:, -response_length - 1 : -1]  # (bsz, response_length)
 
-                if token_selection_top_k is not None:
+                if token_selection_top_k is not None and not self.use_fused_kernels:
+                    lse_rmpad = _memory_efficient_logsumexp(logits_rmpad)
+                    full_lse = pad_input(
+                        hidden_states=lse_rmpad.unsqueeze(-1),
+                        indices=indices,
+                        batch=batch_size,
+                        seqlen=seqlen,
+                    )
+                    self._last_selected_lse = full_lse.squeeze(-1)[:, -response_length - 1 : -1]
                     full_selected_logits = pad_input(
                         hidden_states=selected_logits_rmpad,
                         indices=indices,
@@ -410,6 +495,10 @@ class DataParallelPPOActor(BasePPOActor):
                     )
                     selected_logits = full_selected_logits[:, -response_length - 1 : -1]
                     selected_token_ids = full_selected_token_ids[:, -response_length - 1 : -1]
+                    with torch.no_grad():
+                        self._last_selected_mass = torch.exp(
+                            torch.logsumexp(selected_logits.float(), -1) - self._last_selected_lse.detach()
+                        ).clamp(0.0, 1.0)
 
                 # only return response part:
                 if calculate_entropy:
@@ -452,6 +541,11 @@ class DataParallelPPOActor(BasePPOActor):
                                 )
                             selected_token_ids = token_selection_ids
                             selected_logits = logits.gather(dim=-1, index=selected_token_ids)
+                        self._last_selected_lse = _memory_efficient_logsumexp(logits)
+                        with torch.no_grad():
+                            self._last_selected_mass = torch.exp(
+                                torch.logsumexp(selected_logits.float(), -1) - self._last_selected_lse.detach()
+                            ).clamp(0.0, 1.0)
                     if calculate_log_probs:
                         log_probs = logprobs_from_logits(
                             logits,
@@ -527,6 +621,7 @@ class DataParallelPPOActor(BasePPOActor):
         self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + bsz
 
         k = top_k
+        self._last_teacher_lse = None
         log_prob_full = None if top_k is not None else torch.zeros((bsz, resp_len), dtype=torch.float32, device=device)
         logits_full = ids_full = None
         if top_k is not None:
@@ -538,6 +633,7 @@ class DataParallelPPOActor(BasePPOActor):
         if n_active == 0 and not dummy_for_collective:
             if top_k is not None:
                 logits_full = torch.zeros((bsz, resp_len, k), dtype=torch.float32, device=device)
+                self._last_teacher_lse = torch.zeros((bsz, resp_len), dtype=torch.float32, device=device)
             return log_prob_full, logits_full, ids_full
         if dummy_for_collective:
             active = torch.zeros((1,), dtype=torch.long, device=device)
@@ -549,6 +645,7 @@ class DataParallelPPOActor(BasePPOActor):
             "position_ids": data["edge_teacher_position_ids"].index_select(0, active),
         }
         if top_k is not None:
+            self._last_selected_lse = None
             _, _, sel_logits, sel_ids = self._forward_micro_batch(
                 micro_batch=teacher_batch, temperature=temperature, calculate_entropy=False,
                 calculate_log_probs=False, token_selection_top_k=top_k,
@@ -558,6 +655,10 @@ class DataParallelPPOActor(BasePPOActor):
             logits_full.index_copy_(0, active, sel_logits)
             ids_full = torch.zeros((bsz, resp_len, k), dtype=sel_ids.dtype, device=device)
             ids_full.index_copy_(0, active, sel_ids)
+            if getattr(self, "_last_selected_lse", None) is not None and not dummy_for_collective:
+                teacher_lse_full = torch.zeros((bsz, resp_len), dtype=torch.float32, device=device)
+                teacher_lse_full.index_copy_(0, active, self._last_selected_lse.detach().float())
+                self._last_teacher_lse = teacher_lse_full
         else:
             _, lp, _, _ = self._forward_micro_batch(
                 micro_batch=teacher_batch, temperature=temperature, calculate_entropy=False,
@@ -590,6 +691,42 @@ class DataParallelPPOActor(BasePPOActor):
         """
         # set to eval
         self.actor_module.eval()
+
+        if (
+            bool(data.meta_info.get("tree_mode", False))
+            and not bool(data.meta_info.get("_skip_dead_rows_done", False))
+            and not getattr(self, "_fsdp_sync_optional_forwards", False)
+            and not getattr(self, "use_ulysses_sp", False)
+            and "multi_modal_inputs" not in data.non_tensor_batch
+        ):
+            edge_cfg_lp = self.config.get("edge_distillation", {}) or {}
+            sft_cfg_lp = self.config.get("success_sft", {}) or {}
+            active_mask = _active_training_row_mask(
+                data.batch,
+                tree_batch=True,
+                dedup=bool(data.meta_info.get("dedup_shared_prefix", False)),
+                edge_enabled=bool(edge_cfg_lp.get("enable", False)),
+                sft_enabled=bool(sft_cfg_lp.get("enable", False)),
+                path_tier=int(edge_cfg_lp.get("path_tier", 2)),
+            )
+            if active_mask is not None and not bool(active_mask.all()):
+                total_bsz, resp_len = data.batch["responses"].shape
+                dev = data.batch["responses"].device
+                active_idx = active_mask.nonzero(as_tuple=True)[0]
+                if active_idx.numel() == 0:
+                    zero_lp = torch.zeros((total_bsz, resp_len), dtype=torch.float32, device=dev)
+                    zero_ent = torch.zeros((total_bsz, resp_len), dtype=torch.float32, device=dev) if calculate_entropy else None
+                    return zero_lp, zero_ent
+                sub_data = data.select_idxs(active_idx)
+                sub_data.meta_info = dict(data.meta_info, _skip_dead_rows_done=True)
+                sub_lp, sub_ent = self.compute_log_prob(sub_data, calculate_entropy=calculate_entropy)
+                full_lp = torch.zeros((total_bsz, resp_len), dtype=sub_lp.dtype, device=sub_lp.device)
+                full_lp.index_copy_(0, active_idx.to(sub_lp.device), sub_lp)
+                full_ent = None
+                if calculate_entropy and sub_ent is not None:
+                    full_ent = torch.zeros((total_bsz, resp_len), dtype=sub_ent.dtype, device=sub_ent.device)
+                    full_ent.index_copy_(0, active_idx.to(sub_ent.device), sub_ent)
+                return full_lp, full_ent
 
         micro_batch_size = data.meta_info["micro_batch_size"]
         temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
@@ -733,34 +870,10 @@ class DataParallelPPOActor(BasePPOActor):
             append_to_dict(metrics, {"edge/skipped_missing_inputs": float(bool(edge_missing_keys))})
         for epoch in range(self.config.ppo_epochs):
             for batch_idx, data in enumerate(dataloader):
-                # split batch into micro_batches
                 mini_batch = data
-                if has_multi_modal_inputs:
-                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
-                    num_micro_batches = mini_batch.batch.batch_size[0] // self.config.ppo_micro_batch_size_per_gpu
-                    micro_batches = data.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
-                elif self.config.use_dynamic_bsz:
-                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
-                    micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
-                else:
-                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
-                    # split batch into micro_batches
-                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
-
-                if self._fsdp_sync_optional_forwards:
-                    micro_count_per_rank = torch.tensor(
-                        [len(micro_batches)], dtype=torch.int64,
-                        device=get_torch_device().current_device()
-                    )
-                    micro_counts = [torch.empty_like(micro_count_per_rank)
-                                    for _ in range(torch.distributed.get_world_size())]
-                    torch.distributed.all_gather(micro_counts, micro_count_per_rank)
-                    if len({int(value.item()) for value in micro_counts}) != 1:
-                        raise RuntimeError(
-                            f"Actor microbatch counts differ across ranks in mini {batch_idx}: "
-                            f"{[int(value.item()) for value in micro_counts]}"
-                        )
                 self.actor_optimizer.zero_grad()
+                # 1. Compute global/minibatch denominators BEFORE any dead-row filtering
+                #    so every loss term retains 100% identical scaling.
                 if self._explicit_replica_sync:
                     from verl.utils.replica_sync import summed_denominators
                     mb = mini_batch.batch if isinstance(mini_batch, DataProto) else mini_batch
@@ -777,8 +890,6 @@ class DataParallelPPOActor(BasePPOActor):
                         mask, row_weights, kd_weights,
                         sft_weights=mb["sft_weight"] if sft_enabled else None,
                     )
-                # Non-explicit mode also needs one independent KD denominator
-                # across all micro-batches of this minibatch.
                 if tree_batch and edge_distillation_enabled and not self._explicit_replica_sync:
                     mb_kd = mini_batch.batch if isinstance(mini_batch, DataProto) else mini_batch
                     kd_mask = (mb_kd["loss_mask"] if multi_turn else mb_kd["attention_mask"])[:, -mb_kd["responses"].shape[1]:]
@@ -793,6 +904,108 @@ class DataParallelPPOActor(BasePPOActor):
                     if tree_batch:
                         mask_for_sft = mask_for_sft * (~mb["is_padding_copy"]).unsqueeze(-1)
                     mini_sft_denominator = (mask_for_sft * mb["sft_weight"].unsqueeze(-1)).sum().clamp_min(1)
+
+                # 2. Lossless dead-row skipping when global denominators cancel local token counts
+                if (
+                    tree_batch
+                    and self._explicit_replica_sync
+                    and not self._fsdp_sync_optional_forwards
+                    and not has_multi_modal_inputs
+                    and not self.use_ulysses_sp
+                    and diagnostic_component is None
+                ):
+                    is_proto = isinstance(mini_batch, DataProto)
+                    mb_t = mini_batch.batch if is_proto else mini_batch
+                    active_mask = _active_training_row_mask(
+                        mb_t,
+                        tree_batch=True,
+                        dedup=dedup,
+                        edge_enabled=edge_distillation_enabled,
+                        sft_enabled=sft_enabled,
+                        path_tier=int(edge_cfg.get("path_tier", 2)) if edge_distillation_enabled else 2,
+                    )
+                    if active_mask is not None and not bool(active_mask.all()):
+                        dev = get_torch_device().current_device()
+                        r_len = mb_t["responses"].size(1)
+                        resp_m = (mb_t["loss_mask"] if multi_turn else mb_t["attention_mask"])[:, -r_len:].to(dev)
+                        resp_m = resp_m * (~mb_t["is_padding_copy"].to(dev)).unsqueeze(-1)
+                        w_t = mb_t["w_tok"].to(dev) if dedup else torch.ones(len(resp_m), device=dev)
+                        dead_d = (~active_mask).to(dev)
+                        dead_expanded = resp_m[dead_d] * w_t[dead_d].unsqueeze(-1)
+                        dead_total = dead_expanded.sum()
+                        dead_rows = (w_t[dead_d] * resp_m[dead_d].any(-1)).sum()
+                        statistic_totals.add("actor/expanded_tokens", dead_total)
+                        statistic_totals.add("kd/expanded_rows", dead_rows)
+                        statistic_totals.ratio("actor/response_length_expanded", dead_total, dead_rows)
+                        statistic_totals.ratio("actor/pg_loss_expanded", dead_total * 0.0, dead_total)
+                        statistic_totals.ratio("actor/pg_clipfrac", dead_total * 0.0, dead_total)
+                        statistic_totals.ratio("actor/pg_clipfrac_lower", dead_total * 0.0, dead_total)
+                        statistic_totals.ratio("actor/ppo_kl", dead_total * 0.0, dead_total)
+                        if edge_distillation_enabled:
+                            statistic_totals.ratio("kd/active_token_rate", dead_total * 0.0, dead_total)
+                            statistic_totals.ratio("kd/effective_weight_sum_over_N", dead_total * 0.0, dead_total)
+                            statistic_totals.ratio("kd/weighted_loss_all_tokens", dead_total * 0.0, dead_total)
+                            statistic_totals.ratio("edge/actor_active_row_fraction", dead_rows * 0.0, dead_rows)
+                        dead_real_rows = int((~mb_t["is_padding_copy"][(~active_mask).to(mb_t["is_padding_copy"].device)]).sum())
+                        self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + dead_real_rows
+
+                        def _slice_mb(src, idx_t):
+                            if is_proto:
+                                return src.select_idxs(idx_t.cpu())
+                            return src[idx_t.to(src.device)].clone()
+
+                        def _zero_mb(dst):
+                            target = dst.batch if is_proto else dst
+                            for z_key in ("w_tok", "positive_adv_count", "negative_adv_count", "A_pos", "A_neg",
+                                          "kd_weight", "edge_distill_weight", "sft_weight", "advantages"):
+                                if z_key in target:
+                                    target[z_key].zero_()
+                            if "kd_canonical" in target:
+                                target["kd_canonical"].fill_(False)
+                            if "is_padding_copy" in target:
+                                target["is_padding_copy"].fill_(True)
+                            return dst
+
+                        active_idx = active_mask.nonzero(as_tuple=True)[0]
+                        if active_idx.numel() == 0:
+                            dummy_n = 1 if self.config.use_dynamic_bsz else self.config.ppo_micro_batch_size_per_gpu
+                            z_idx = torch.zeros(dummy_n, dtype=torch.long)
+                            mini_batch = _zero_mb(_slice_mb(mini_batch, z_idx))
+                        else:
+                            selected_mb = _slice_mb(mini_batch, active_idx)
+                            if not self.config.use_dynamic_bsz:
+                                rem = len(selected_mb) % self.config.ppo_micro_batch_size_per_gpu
+                                if rem != 0:
+                                    pad_n = self.config.ppo_micro_batch_size_per_gpu - rem
+                                    pad_mb = _zero_mb(_slice_mb(selected_mb, torch.zeros(pad_n, dtype=torch.long)))
+                                    selected_mb = DataProto.concat([selected_mb, pad_mb]) if is_proto else torch.cat([selected_mb, pad_mb], dim=0)
+                            mini_batch = selected_mb
+
+                # 3. Split mini_batch into micro_batches
+                if has_multi_modal_inputs:
+                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    num_micro_batches = mini_batch.batch.batch_size[0] // self.config.ppo_micro_batch_size_per_gpu
+                    micro_batches = mini_batch.select(select_keys, non_tensor_select_keys).chunk(num_micro_batches)
+                elif self.config.use_dynamic_bsz:
+                    max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
+                    micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
+                else:
+                    self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                    micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+
+                if self._fsdp_sync_optional_forwards:
+                    micro_count_per_rank = torch.tensor(
+                        [len(micro_batches)], dtype=torch.int64,
+                        device=get_torch_device().current_device()
+                    )
+                    micro_counts = [torch.empty_like(micro_count_per_rank)
+                                    for _ in range(torch.distributed.get_world_size())]
+                    torch.distributed.all_gather(micro_counts, micro_count_per_rank)
+                    if len({int(value.item()) for value in micro_counts}) != 1:
+                        raise RuntimeError(
+                            f"Actor microbatch counts differ across ranks in mini {batch_idx}: "
+                            f"{[int(value.item()) for value in micro_counts]}"
+                        )
 
                 from contextlib import nullcontext
                 accumulation_context = self.actor_module.no_sync() if self._explicit_replica_sync else nullcontext()
@@ -844,6 +1057,8 @@ class DataParallelPPOActor(BasePPOActor):
                             # the teacher-row-fraction denominator.
                             self._edge_teacher_rows = getattr(self, "_edge_teacher_rows", 0)
                             self._edge_teacher_rows_total = getattr(self, "_edge_teacher_rows_total", 0) + responses.size(0)
+                        self._last_teacher_lse = None
+                        self._last_selected_lse = None
                         if (edge_distillation_enabled and edge_token_selection == "teacher_topk"
                                 and (not tree_batch or active_tree_kd or self._fsdp_sync_optional_forwards)):
                             # Same actor module under no_grad, evaluated before the student,
@@ -852,9 +1067,13 @@ class DataParallelPPOActor(BasePPOActor):
                             _, teacher_topk_logits, teacher_topk_ids = self._edge_teacher_forward_active(
                                 data, responses, temperature, top_k=edge_top_k
                             )
+                        teacher_topk_lse = getattr(self, "_last_teacher_lse", None)
 
                         # all return: (bsz, response_length)
-                        calculate_entropy = entropy_coeff != 0 or tree_batch
+                        self._last_selected_lse = None
+                        calculate_entropy = (entropy_coeff != 0) or (
+                            os.environ.get("T75_FORCE_ACTOR_ENTROPY", "0") == "1"
+                        )
                         entropy, log_prob, student_topk_logits, _ = self._forward_micro_batch(
                             micro_batch=data,
                             temperature=temperature,
@@ -864,9 +1083,11 @@ class DataParallelPPOActor(BasePPOActor):
                         )
 
                         kd_noexp_dummy_loss = None
+                        tree_student_lse = None
                         if tree_batch and (active_tree_kd or (edge_distillation_enabled and self._fsdp_sync_optional_forwards)):
                             tree_student_logits = student_topk_logits
-                            tree_student_mass = self._last_selected_mass
+                            tree_student_lse = getattr(self, "_last_selected_lse", None)
+                            tree_student_mass = getattr(self, "_last_selected_mass", None)
                             tree_gap = torch.zeros_like(log_prob)
                             extra = ((data["edge_distill_weight"] > 0) & data["kd_path_has_T"]).nonzero(as_tuple=True)[0]
                             kd_dummy = extra.numel() == 0 and self._fsdp_sync_optional_forwards
@@ -888,6 +1109,7 @@ class DataParallelPPOActor(BasePPOActor):
                                         device=responses.device, dtype=torch.long
                                     )
                                 )
+                                self._last_selected_lse = None
                                 _, noexp_lp, noexp_logits, _ = self._forward_micro_batch(
                                     noexp, temperature, token_selection_top_k=edge_top_k,
                                     token_selection_ids=selected_ids
@@ -898,7 +1120,10 @@ class DataParallelPPOActor(BasePPOActor):
                                     kd_noexp_dummy_loss = noexp_lp.sum() * 0.0
                                 else:
                                     tree_student_logits = student_topk_logits.index_copy(0, extra, noexp_logits)
-                                    tree_student_mass = tree_student_mass.index_copy(0, extra, self._last_selected_mass)
+                                    if tree_student_lse is not None and getattr(self, "_last_selected_lse", None) is not None:
+                                        tree_student_lse = tree_student_lse.index_copy(0, extra, self._last_selected_lse)
+                                    if tree_student_mass is not None and getattr(self, "_last_selected_mass", None) is not None:
+                                        tree_student_mass = tree_student_mass.index_copy(0, extra, self._last_selected_mass)
                                     tree_gap = tree_gap.index_copy(
                                         0, extra, log_prob.index_select(0, extra) - noexp_lp
                                     )
@@ -949,8 +1174,15 @@ class DataParallelPPOActor(BasePPOActor):
                             if tree_batch:
                                 if active_tree_kd:
                                     from agent_system.tree.loss import tree_topk_loss
-                                    edge_loss, tree_kl, tree_gradient = tree_topk_loss(tree_student_logits,
-                                        teacher_topk_logits, response_mask, data["edge_distill_weight"], response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask)
+                                    edge_loss, tree_kl, tree_gradient = tree_topk_loss(
+                                        tree_student_logits,
+                                        teacher_topk_logits,
+                                        response_mask,
+                                        data["edge_distill_weight"],
+                                        response_mask * data["w_tok"].unsqueeze(-1) if dedup else response_mask,
+                                        student_lse=tree_student_lse,
+                                        teacher_lse=teacher_topk_lse,
+                                    )
                                     edge_metrics = {}
                                 else:
                                     edge_loss = log_prob.sum()*0

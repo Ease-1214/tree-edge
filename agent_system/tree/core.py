@@ -160,10 +160,25 @@ class TreeRollout:
         }
 
     def expanded_rows(self):
-        advantages = self.training_advantages()
+        base_advantages = leaf_advantages(self.leaves)
+        coefficient = float(getattr(self, "invalid_action_penalty_coef", 0.0))
+        rewards_by_uid = defaultdict(list)
+        for leaf in self.leaves:
+            rewards_by_uid[leaf.uid].append(leaf.reward)
+        # Skip SFT on all-correct zero-variance questions (already mastered, GRPO adv == 0),
+        # while keeping all natural & tree successes on non-saturated questions (0/4..3/4).
+        all_correct_uids = {
+            uid for uid, vals in rewards_by_uid.items()
+            if len(vals) > 1 and all(r == 1 for r in vals)
+        }
         rows = []
         for leaf in sorted(self.leaves, key=lambda x: x.leaf_id):
+            uid_saturated = leaf.uid in all_correct_uids
             for node_id in leaf.node_ids:
+                node_valid = bool(self.nodes[node_id].valid)
+                node_adv = base_advantages[leaf.leaf_id] - (
+                    coefficient if (coefficient != 0.0 and not node_valid) else 0.0
+                )
                 rows.append(
                     dict(
                         uid=leaf.uid,
@@ -173,10 +188,10 @@ class TreeRollout:
                         fork_id=self.nodes[node_id].fork_id,
                         row_id=leaf.leaf_id + ":" + node_id,
                         reward=leaf.reward,
-                        advantage=advantages[leaf.leaf_id],
+                        advantage=node_adv,
                         kd_weight=0.0,
                         sft_weight=float(
-                            leaf.reward == 1 and self.nodes[node_id].valid
+                            leaf.reward == 1 and node_valid and not uid_saturated
                         ),
                         kd_canonical=False,
                         is_padding_copy=False,

@@ -562,7 +562,7 @@ Generate 0-{self.max_new_experiences_per_update} experiences. Each item must con
 - avoid_action: the mistake to avoid
 - expected_effect: why this leads to a correct answer
 - state_cues: list of short general cues visible in the question (for task) or in the retrieved passages/history (for step)
-- retrieval_text: one or two natural, descriptive sentences describing the question structure (for task) or the search progress and observation state (for step) used for semantic retrieval
+- retrieval_text: one or two purely declarative state-description sentences matching retrieval queries 鈥?describe ONLY the question structure (for task, e.g., "A multi-hop question asking for...") or observable snippet status (for step, e.g., "Observation status: multiple candidate films share the same title..."). Do NOT start with imperative verbs like "Use this", "Apply this", or "Search for"
 - source_examples: list of the Example numbers this experience is based on (integers)
 
 Return ONLY a JSON array of experience objects.
@@ -632,6 +632,16 @@ Return ONLY a JSON array of experience objects.
                 continue
             if exp.get("task_type") not in self.SEARCH_TASK_TYPES:
                 exp["task_type"] = "multi_hop_reasoning" if "hop" in low else "direct_retrieval"
+            if exp.get("retrieval_text"):
+                rt = str(exp["retrieval_text"]).strip()
+                rt = re.sub(
+                    r"^(?:use|apply)\s+this\s+(?:strategy|rule|experience|guidance)\s+(?:when|for|after|if)\s+",
+                    "",
+                    rt,
+                    flags=re.I,
+                ).strip()
+                if rt:
+                    exp["retrieval_text"] = rt[0].upper() + rt[1:]
             sources = []
             for n in exp.get("source_examples", []) or []:
                 try:

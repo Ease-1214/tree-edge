@@ -89,6 +89,7 @@ CLEAN_WANDB_PANELS = (
     ("4_loss/pg_loss", ("actor/pg_loss_expanded", "actor/pg_loss")),
     ("4_loss/opsd_loss", ("kd/weighted_loss_active_tokens", "edge/distill_loss")),
     ("4_loss/opsd_active_rows", ("kd/canonical_rows", "kd/active_rows")),
+    ("4_loss/opsd_topk_mass", ("kd/student_mass", "kd/no_T/student_mass")),
     ("4_loss/sft_loss", ("sft/loss_token_mean",)),
     ("4_loss/sft_active_rows", ("sft/active_rows",)),
     ("4_loss/grad_norm", ("actor/grad_norm",)),

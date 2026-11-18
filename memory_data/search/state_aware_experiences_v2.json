@@ -7,7 +7,7 @@
       "claude_style_experiences_search.json"
     ],
     "generation_note": "V3 dual-pool search experience bank separating initial question-level planning strategies (task_experiences) from mid-search observation-conditioned strategies (step_experiences), with natural-language retrieval_obs descriptions.",
-    "task_experience_count": 11,
+    "task_experience_count": 10,
     "step_experience_count": 13,
     "experience_id_high_watermarks": {
       "task": 11,
@@ -16,24 +16,6 @@
     }
   },
   "task_experiences": [
-    {
-      "experience_id": "task_000001",
-      "task_type": "general",
-      "title": "Emit one valid search or answer tag per turn",
-      "principle": "Emit exactly one concrete <search> query </search> or one concise <answer> answer </answer> after the think block. Avoid emitting both actions, leaving the query as a placeholder, or putting explanatory prose inside the answer. The action parser accepts the turn and either retrieves evidence or terminates with a scorable answer.",
-      "when_to_apply": "When the model is about to choose the next action after reasoning in <think>.",
-      "retrieval_obs": "Answering an open-domain question that requires issuing a single structured search query or returning a concise final answer string.",
-      "trigger": "the model is about to choose the next action",
-      "recommended_action": "emit exactly one concrete <search> query </search> or one concise <answer> answer </answer> after the think block",
-      "avoid_action": "emit both actions, leave the query as a placeholder, or put explanatory prose inside the answer",
-      "expected_effect": "the action parser accepts the turn and either retrieves evidence or terminates with a scorable answer",
-      "state_cues": ["search/answer protocol", "think block complete", "one action required", "action parser"],
-      "utility": 0.0,
-      "retrieval_count": 0,
-      "last_retrieval_step": 0,
-      "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
-    },
     {
       "experience_id": "task_000002",
       "task_type": "general",
@@ -45,12 +27,22 @@
       "recommended_action": "search the exact entity name together with the single fact or relation being asked for",
       "avoid_action": "answer from uncertain memory or search the full conversational wording of the question",
       "expected_effect": "the first result set targets the answer-bearing fact",
-      "state_cues": ["initial question", "no search history", "unknown fact", "entity and attribute identifiable"],
+      "state_cues": [
+        "initial question",
+        "no search history",
+        "unknown fact",
+        "entity and attribute identifiable"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000003",
@@ -63,12 +55,22 @@
       "recommended_action": "search the entity plus the requested attribute in a short query, then answer as soon as a snippet states the value",
       "avoid_action": "decompose a one-hop fact into unnecessary searches or return a broad biography",
       "expected_effect": "direct factoid questions finish within one or two steps",
-      "state_cues": ["single named entity", "one requested fact", "who what when where", "direct lookup"],
+      "state_cues": [
+        "single named entity",
+        "one requested fact",
+        "who what when where",
+        "direct lookup"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000004",
@@ -81,12 +83,22 @@
       "recommended_action": "search the distinctive phrase in quotation marks with one context word such as author, song, film, or episode",
       "avoid_action": "search only generic surrounding terms that discard the unique phrase",
       "expected_effect": "exact-match results identify the source efficiently",
-      "state_cues": ["quoted phrase", "title identification", "distinctive wording", "source requested"],
+      "state_cues": [
+        "quoted phrase",
+        "title identification",
+        "distinctive wording",
+        "source requested"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000005",
@@ -99,12 +111,22 @@
       "recommended_action": "search the canonical entity name plus the exact attribute label and check that the snippet predicates the value of that entity",
       "avoid_action": "return an attribute of a related person, organization, or work",
       "expected_effect": "the entity-attribute pair is retrieved without relation confusion",
-      "state_cues": ["occupation or nationality", "birthplace", "genre or language", "named entity"],
+      "state_cues": [
+        "occupation or nationality",
+        "birthplace",
+        "genre or language",
+        "named entity"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000006",
@@ -117,12 +139,22 @@
       "recommended_action": "solve the first relation, record the exact intermediate entity, then issue a second query for that entity and the final relation",
       "avoid_action": "combine all hops into one overloaded query or skip the intermediate identity",
       "expected_effect": "each search has one resolvable relation and the evidence chain stays traceable",
-      "state_cues": ["bridge question", "whose or which reference", "two relations", "intermediate entity unknown"],
+      "state_cues": [
+        "bridge question",
+        "whose or which reference",
+        "two relations",
+        "intermediate entity unknown"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000007",
@@ -135,12 +167,22 @@
       "recommended_action": "retrieve the same comparison attribute for each entity separately, normalize units or dates, then apply the requested comparison",
       "avoid_action": "compare different attributes or decide after finding a value for only one entity",
       "expected_effect": "the comparison is based on symmetric evidence",
-      "state_cues": ["which is older larger earlier", "two entities", "same attribute needed", "comparison wording"],
+      "state_cues": [
+        "which is older larger earlier",
+        "two entities",
+        "same attribute needed",
+        "comparison wording"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000008",
@@ -153,12 +195,22 @@
       "recommended_action": "include the relevant year or temporal qualifier in the query and distinguish event date from publication or announcement date",
       "avoid_action": "use an undated snippet or confuse a planned date with an occurred event",
       "expected_effect": "the answer respects the question's temporal scope",
-      "state_cues": ["current or latest", "before or after", "release date", "multiple dates in snippets"],
+      "state_cues": [
+        "current or latest",
+        "before or after",
+        "release date",
+        "multiple dates in snippets"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000009",
@@ -171,12 +223,22 @@
       "recommended_action": "retrieve candidates for the rarer condition first, then test those candidates against the second condition",
       "avoid_action": "search both broad conditions independently and guess an overlap",
       "expected_effect": "the intersection is established with entity-specific evidence",
-      "state_cues": ["both conditions", "which person or work", "set intersection", "multiple candidates"],
+      "state_cues": [
+        "both conditions",
+        "which person or work",
+        "set intersection",
+        "multiple candidates"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000010",
@@ -189,12 +251,22 @@
       "recommended_action": "search the exact work title plus the requested creator role and verify the role wording in the snippet",
       "avoid_action": "return a cast member, character, editor, or similarly related person with the wrong role",
       "expected_effect": "the answer matches the requested relationship to the work",
-      "state_cues": ["named work", "creator role", "author director performer publisher", "multiple people in snippet"],
+      "state_cues": [
+        "named work",
+        "creator role",
+        "author director performer publisher",
+        "multiple people in snippet"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "task_000011",
@@ -207,12 +279,22 @@
       "recommended_action": "resolve the immediate place or institution first, then search that exact entity for the requested broader location",
       "avoid_action": "jump directly from the starting entity to a guessed country or city",
       "expected_effect": "geographic hops preserve the requested level of granularity",
-      "state_cues": ["where located", "birthplace institution", "city country chain", "intermediate place"],
+      "state_cues": [
+        "where located",
+        "birthplace institution",
+        "city country chain",
+        "intermediate place"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     }
   ],
   "step_experiences": [
@@ -227,12 +309,22 @@
       "recommended_action": "extract the minimal answer string supported by the snippet and return it in the answer tag",
       "avoid_action": "spend another search on the same fact or add unsupported qualifications",
       "expected_effect": "the episode terminates promptly with an evidence-backed answer",
-      "state_cues": ["answer-bearing snippet", "entity and relation resolved", "direct wording", "enough evidence"],
+      "state_cues": [
+        "answer-bearing snippet",
+        "entity and relation resolved",
+        "direct wording",
+        "enough evidence"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000002",
@@ -245,12 +337,22 @@
       "recommended_action": "change the query by adding a discriminating qualifier, alternate entity name, date, title, or relation phrase",
       "avoid_action": "repeat the identical query or merely reorder generic words",
       "expected_effect": "the next retrieval explores a meaningfully different evidence path",
-      "state_cues": ["irrelevant snippets", "ambiguous namesake", "duplicate results", "answer absent"],
+      "state_cues": [
+        "irrelevant snippets",
+        "ambiguous namesake",
+        "duplicate results",
+        "answer absent"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000003",
@@ -263,12 +365,22 @@
       "recommended_action": "treat it as a lead, identify the missing fact, and search that fact directly before answering",
       "avoid_action": "infer the answer from topical proximity or from an entity merely appearing in the snippet",
       "expected_effect": "the final answer is grounded in an explicit relation rather than a guess",
-      "state_cues": ["related entity mentioned", "needed predicate absent", "partial evidence", "tempting inference"],
+      "state_cues": [
+        "related entity mentioned",
+        "needed predicate absent",
+        "partial evidence",
+        "tempting inference"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000004",
@@ -281,12 +393,22 @@
       "recommended_action": "bind each retrieved fact to the full entity identity and use occupation, location, date, or work title to disambiguate",
       "avoid_action": "merge facts belonging to namesakes or assume every occurrence of a surname is the same entity",
       "expected_effect": "entity resolution remains consistent across search steps",
-      "state_cues": ["same or similar names", "multiple entities", "ambiguous pronoun", "different dates or occupations"],
+      "state_cues": [
+        "same or similar names",
+        "multiple entities",
+        "ambiguous pronoun",
+        "different dates or occupations"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000005",
@@ -299,12 +421,22 @@
       "recommended_action": "carry forward only the resolved entity/value and search it with the remaining predicate",
       "avoid_action": "repeat the first-hop query or answer with the intermediate entity when the question asks for a later fact",
       "expected_effect": "the next step advances the chain instead of restarting it",
-      "state_cues": ["intermediate entity found", "one hop resolved", "final relation unanswered", "search step remains"],
+      "state_cues": [
+        "intermediate entity found",
+        "one hop resolved",
+        "final relation unanswered",
+        "search step remains"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000006",
@@ -317,12 +449,22 @@
       "recommended_action": "verify the shared bridge entity is identical across both snippets, then return only the final endpoint value",
       "avoid_action": "include the bridge as the answer or join facts from different namesakes",
       "expected_effect": "the composed answer follows the supported two-hop chain",
-      "state_cues": ["first-hop evidence", "second-hop evidence", "shared bridge entity", "chain complete"],
+      "state_cues": [
+        "first-hop evidence",
+        "second-hop evidence",
+        "shared bridge entity",
+        "chain complete"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000007",
@@ -335,12 +477,22 @@
       "recommended_action": "retain the first value and search only the second entity with the identical attribute",
       "avoid_action": "search the first entity again or infer the second value from relative wording",
       "expected_effect": "the remaining search fills the exact evidence gap",
-      "state_cues": ["one comparison value known", "second value unknown", "same unit required", "partial comparison"],
+      "state_cues": [
+        "one comparison value known",
+        "second value unknown",
+        "same unit required",
+        "partial comparison"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000008",
@@ -353,12 +505,22 @@
       "recommended_action": "extract the exact number with its unit and time reference, converting units only when the question requires it",
       "avoid_action": "drop the unit, mix values from different years, or round away a distinction needed by the question",
       "expected_effect": "the numerical answer is precise and contextually correct",
-      "state_cues": ["number requested", "units", "year-specific value", "multiple quantities in result"],
+      "state_cues": [
+        "number requested",
+        "units",
+        "year-specific value",
+        "multiple quantities in result"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000009",
@@ -371,12 +533,22 @@
       "recommended_action": "issue a disambiguating query with the full entity and disputed attribute, preferring a snippet that directly states the relation in the correct context",
       "avoid_action": "average conflicting numbers or select the first result without resolving context",
       "expected_effect": "the conflict is resolved before finalizing the answer",
-      "state_cues": ["conflicting snippets", "different dates or values", "same entity", "critical answer fact"],
+      "state_cues": [
+        "conflicting snippets",
+        "different dates or values",
+        "same entity",
+        "critical answer fact"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000010",
@@ -389,12 +561,22 @@
       "recommended_action": "synthesize the existing snippets against the exact question and answer if every required relation is supported",
       "avoid_action": "continue searching merely to accumulate more text or overwrite a supported fact with noisier results",
       "expected_effect": "the agent avoids wasting the four-step search budget",
-      "state_cues": ["multiple useful snippets", "required facts resolved", "late search step", "broad next query"],
+      "state_cues": [
+        "multiple useful snippets",
+        "required facts resolved",
+        "late search step",
+        "broad next query"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000011",
@@ -407,12 +589,22 @@
       "recommended_action": "reduce the next search to one entity-relation pair, starting with the dependency needed by later hops",
       "avoid_action": "add more clauses or copy the entire multi-hop question again",
       "expected_effect": "retrieval returns focused evidence that can seed the next hop",
-      "state_cues": ["overloaded query", "multi-clause question", "weak broad results", "unresolved dependency"],
+      "state_cues": [
+        "overloaded query",
+        "multi-clause question",
+        "weak broad results",
+        "unresolved dependency"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000012",
@@ -425,12 +617,22 @@
       "recommended_action": "return the shortest unambiguous form that preserves the identity expected by the question",
       "avoid_action": "include a sentence of explanation or switch to an unsupported alias",
       "expected_effect": "the final answer is concise while remaining semantically equivalent to the evidence",
-      "state_cues": ["official long name", "alias or abbreviation", "answer known", "concise answer required"],
+      "state_cues": [
+        "official long name",
+        "alias or abbreviation",
+        "answer known",
+        "concise answer required"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     },
     {
       "experience_id": "step_000013",
@@ -443,12 +645,22 @@
       "recommended_action": "use the strongest supported answer from the accumulated evidence if one exists; otherwise make one final highly specific entity-relation search rather than a broad retry",
       "avoid_action": "repeat a failed query or output an answer contradicted by the snippets",
       "expected_effect": "the final step is allocated to either a defensible answer or the most targeted remaining evidence gap",
-      "state_cues": ["late step", "repeated failed searches", "partial evidence", "one evidence gap"],
+      "state_cues": [
+        "late step",
+        "repeated failed searches",
+        "partial evidence",
+        "one evidence gap"
+      ],
       "utility": 0.0,
       "retrieval_count": 0,
       "last_retrieval_step": 0,
       "created_at_step": 0,
-      "evidence": {"positive_gain_count": 0, "negative_gain_count": 0, "source_traj_uids": [], "last_updated_step": null}
+      "evidence": {
+        "positive_gain_count": 0,
+        "negative_gain_count": 0,
+        "source_traj_uids": [],
+        "last_updated_step": null
+      }
     }
   ]
 }

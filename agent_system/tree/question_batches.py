@@ -5,11 +5,20 @@ import math
 import random
 
 
-def question_batches(rows, batch_size=256):
+def _resolve_minibatch_count(num_rows, batch_size=256, max_mini_batches=None):
+    if num_rows <= 0:
+        return 1
+    count = max(1, math.ceil(num_rows / max(1, int(batch_size))))
+    if max_mini_batches is not None and int(max_mini_batches) > 0:
+        count = min(count, int(max_mini_batches))
+    return max(1, count)
+
+
+def question_batches(rows, batch_size=256, max_mini_batches=None):
     groups = defaultdict(list)
     for index, row in enumerate(rows):
         groups[row["uid"]].append(index)
-    count = math.ceil(len(rows) / batch_size)
+    count = _resolve_minibatch_count(len(rows), batch_size=batch_size, max_mini_batches=max_mini_batches)
     bins = [[] for _ in range(count)]
     loads = [0] * count
     for uid, indices in sorted(
@@ -50,12 +59,12 @@ def collapse_rows(rows, indices):
     return list(groups.values())
 
 
-def node_mixed_plan(rows, sequence_lengths, world_size=4, batch_size=256, seed=0):
-    """Keep the expanded update count, balance ranks by compute and bins by weight."""
+def node_mixed_plan(rows, sequence_lengths, world_size=4, batch_size=256, seed=0, max_mini_batches=None):
+    """Balance ranks by compute and bins by weight, capped at max_mini_batches when specified."""
     from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions
 
     nodes = collapse_rows(rows, range(len(rows)))
-    count = math.ceil(len(rows) / batch_size)
+    count = _resolve_minibatch_count(len(rows), batch_size=batch_size, max_mini_batches=max_mini_batches)
     costs = [
         sequence_lengths[item["source_indices"][0]] * item["w_tok"] for item in nodes
     ]
@@ -149,7 +158,7 @@ def real_node_loads(batch, world_size, edge_enabled=True, success_sft=True):
 
 
 def prepare_dedup_batch(batch, tree, world_size=4, batching="question_grouped", seed=0,
-                        expanded_rows=None):
+                        expanded_rows=None, batch_size=256, max_mini_batches=None):
     """Deduplicate from a full legacy batch or a packed-only-once node batch.
 
     When expanded_rows is provided, *batch* contains one canonical representative
@@ -181,10 +190,13 @@ def prepare_dedup_batch(batch, tree, world_size=4, batching="question_grouped", 
             for node_id, i in packed_row_for_node.items()
         }
         lengths = [length_by_node[row["node_id"]] for row in rows]
-    bins = question_batches(rows)
+    bins = question_batches(rows, batch_size=batch_size, max_mini_batches=max_mini_batches)
     mixed = None
     if batching == "node_mixed":
-        mixed = node_mixed_plan(rows, lengths, world_size, seed=seed)
+        mixed = node_mixed_plan(
+            rows, lengths, world_size, batch_size=batch_size,
+            seed=seed, max_mini_batches=max_mini_batches,
+        )
     elif batching != "question_grouped":
         raise ValueError(f"Unknown tree dedup batching strategy: {batching}")
     ranks = [[] for _ in range(world_size)]

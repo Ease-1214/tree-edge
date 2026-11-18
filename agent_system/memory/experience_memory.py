@@ -333,17 +333,26 @@ class ExperienceMemory(BaseMemory):
                 ]
                 if part
             )
-        title = trigger or recommended_action or self._canonical_task_query(task_type)
-        principle = ". ".join(
-            part
-            for part in [recommended_action, f"Avoid {avoid_action}" if avoid_action else "", expected_effect]
-            if part
-        )
-        when_to_apply = ". ".join(
-            part
-            for part in [f"Task type: {task_type}", trigger, " ".join(state_cues)]
-            if part
-        )
+        def _clean_clause(s: str) -> str:
+            return re.sub(r"\s+", " ", str(s or "")).strip().rstrip(". ;")
+
+        clean_trigger = _clean_clause(trigger)
+        clean_do = _clean_clause(recommended_action)
+        clean_avoid_raw = _clean_clause(avoid_action)
+        # Strip redundant leading "Avoid " / "Do not " / "Don't " before prepending "Avoid "
+        clean_avoid_body = re.sub(r"^(?:avoid\s+|do\s+not\s+|don't\s+|never\s+)+", "", clean_avoid_raw, flags=re.I).strip()
+        clean_expect = _clean_clause(expected_effect)
+        clean_cues = "; ".join(_clean_clause(c) for c in state_cues if _clean_clause(c))
+
+        title = clean_trigger or clean_do or self._canonical_task_query(task_type)
+        principle_parts = [p for p in (
+            clean_do,
+            f"Avoid {clean_avoid_body}" if clean_avoid_body else "",
+            clean_expect,
+        ) if p]
+        principle = (". ".join(principle_parts) + ".") if principle_parts else ""
+        when_parts = [p for p in (clean_trigger, clean_cues) if p]
+        when_to_apply = (". ".join(when_parts) + ".") if when_parts else f"Task type: {task_type}."
         return {
             "experience_id": exp_id,
             "task_type": task_type,
@@ -1445,17 +1454,29 @@ class ExperienceMemory(BaseMemory):
             return None
         lines = [title]
         for experience in experiences:
-            heading = (experience.get("title") or experience.get("trigger") or experience.get("when_to_apply") or "").strip()
-            principle = (experience.get("principle") or experience.get("recommended_action") or "").strip()
-            when_to_apply = (experience.get("when_to_apply") or "").strip()
-            if heading and principle:
-                lines.append(f"- **{heading}**: {principle}")
-            elif heading:
-                lines.append(f"- **{heading}**")
-            elif principle:
-                lines.append(f"- {principle}")
-            if when_to_apply and _normalise_text(when_to_apply) != _normalise_text(heading):
-                lines.append(f"  _When to apply: {when_to_apply}_")
+            trigger = re.sub(r"\s+", " ", str(experience.get("trigger") or "")).strip().rstrip(". ;")
+            do_act = re.sub(r"\s+", " ", str(experience.get("recommended_action") or "")).strip().rstrip(". ;")
+            avoid_raw = re.sub(r"\s+", " ", str(experience.get("avoid_action") or "")).strip().rstrip(". ;")
+            avoid_clean = re.sub(r"^(?:avoid\s+|do\s+not\s+|don't\s+)+", "", avoid_raw, flags=re.I).strip()
+            if trigger or do_act:
+                when_line = trigger or re.sub(r"\s+", " ", str(experience.get("when_to_apply") or experience.get("title") or "")).strip().rstrip(". ;")
+                lines.append(f"- When: {when_line}.")
+                if do_act:
+                    lines.append(f"  Do: {do_act}.")
+                if avoid_clean:
+                    lines.append(f"  Avoid: {avoid_clean}.")
+            else:
+                heading = (experience.get("title") or experience.get("when_to_apply") or "").strip()
+                principle = (experience.get("principle") or "").strip()
+                when_to_apply = (experience.get("when_to_apply") or "").strip()
+                if heading and principle:
+                    lines.append(f"- **{heading}**: {principle}")
+                elif heading:
+                    lines.append(f"- **{heading}**")
+                elif principle:
+                    lines.append(f"- {principle}")
+                if when_to_apply and _normalise_text(when_to_apply) != _normalise_text(heading):
+                    lines.append(f"  _When to apply: {when_to_apply}_")
         return "\n".join(lines)
 
     def format_for_prompt(self, retrieved_memories: Dict[str, Any]) -> str:

@@ -3,11 +3,39 @@
 import torch
 
 
-def tree_topk_loss(student, teacher, response_mask, weights, grpo_mask):
-    log_s = torch.log_softmax(student.float(), dim=-1)
-    log_t = torch.log_softmax(teacher.detach().float(), dim=-1)
-    probability = log_s.exp()
-    kl = (probability * (log_s - log_t)).sum(-1)
+def tree_topk_loss(
+    student,
+    teacher,
+    response_mask,
+    weights,
+    grpo_mask,
+    student_lse=None,
+    teacher_lse=None,
+):
+    s_f = student.float()
+    t_f = teacher.detach().float()
+    if student_lse is not None and teacher_lse is not None:
+        # Exact (K + 1)-bucket coarse-grained Reverse KL over {v_1..v_K, Rest}:
+        # captures both out-of-top-K probability mass mismatch and within-top-K ordering.
+        eps = 1e-7
+        s_top_lse = torch.logsumexp(s_f, dim=-1, keepdim=True)
+        t_top_lse = torch.logsumexp(t_f, dim=-1, keepdim=True)
+        s_Z = torch.maximum(student_lse.float().unsqueeze(-1), s_top_lse)
+        t_Z = torch.maximum(teacher_lse.detach().float().unsqueeze(-1), t_top_lse)
+        log_s = s_f - s_Z
+        log_t = t_f - t_Z
+        probability = log_s.exp()
+        mass_s = probability.sum(dim=-1).clamp(min=0.0, max=1.0 - eps)
+        mass_t = log_t.exp().sum(dim=-1).clamp(min=0.0, max=1.0 - eps)
+        log_s_rest = torch.log1p(-mass_s)
+        log_t_rest = torch.log1p(-mass_t)
+        p_s_rest = 1.0 - mass_s
+        kl = (probability * (log_s - log_t)).sum(-1) + p_s_rest * (log_s_rest - log_t_rest)
+    else:
+        log_s = torch.log_softmax(s_f, dim=-1)
+        log_t = torch.log_softmax(t_f, dim=-1)
+        probability = log_s.exp()
+        kl = (probability * (log_s - log_t)).sum(-1)
     active = response_mask * (weights > 0).unsqueeze(-1)
     # Match EDGE: only KD-active tokens count in the denominator. Do not
     # normalize by weights, which would cancel the subtree gain gate.

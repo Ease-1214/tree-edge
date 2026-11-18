@@ -441,9 +441,9 @@ def _choose_single_fork_experience(payload, pool_name, candidate_limit):
 def build_step_retrieval_query(state, max_steps=4):
     """Build a deterministic state-diagnostic summary for step-level retrieval.
 
-    Avoids diluting observation-state embeddings with the raw question and verbose
-    turn-counter boilerplate; emits factual observable status cues, snippet titles,
-    and a concise 160-character excerpt aligned with step retrieval_obs semantics.
+    Extracts balanced per-document excerpts across Doc 1..3 (up to 100 chars each)
+    so answers in Doc 2/Doc 3 are visible, and diagnoses unfocused long queries
+    only when >=14 unquoted words coincide with low question-passage term overlap.
     """
     prev_queries = []
     for action, _ in (state.history or []):
@@ -453,15 +453,40 @@ def build_step_retrieval_query(state, max_steps=4):
     step_num = int(state.turns or 0) + 1
     raw_obs = str(state.last_observation or "")
     titles = [t.strip() for t in re.findall(r"Doc\s+\d+\(Title:\s*((?:[^()]|\([^)]*\))+)\)", raw_obs) if t.strip()]
-    obs_clean = re.sub(r"</?information>", " ", raw_obs, flags=re.I)
-    obs_clean = re.sub(r"Doc\s+\d+\((?:[^()]|\([^)]*\))*\)\s*", "", obs_clean)
+    raw_no_tags = re.sub(r"</?information>", " ", raw_obs, flags=re.I)
+
+    # Extract balanced excerpts across up to 3 retrieved documents (~100 chars each)
+    doc_splits = re.split(r"Doc\s+\d+\((?:[^()]|\([^)]*\))*\)\s*", raw_no_tags)
+    doc_bodies = [re.sub(r"\s+", " ", b).strip() for b in doc_splits[1:] if b and b.strip()]
+    obs_clean = re.sub(r"Doc\s+\d+\((?:[^()]|\([^)]*\))*\)\s*", " ", raw_no_tags)
     obs_clean = re.sub(r"\s+", " ", obs_clean).strip()
+    if doc_bodies:
+        per_doc_excerpt = " | ".join(b[:100].strip() for b in doc_bodies[:3])
+    else:
+        per_doc_excerpt = obs_clean[:240]
 
     q_low = str(state.question or "").lower()
     obs_low = obs_clean.lower()
     is_empty = (not obs_clean) or ("no matching" in obs_low) or ("no results" in obs_low)
     is_repeat = len(prev_queries) >= 2 and prev_queries[-1].casefold() == prev_queries[-2].casefold()
-    is_long_q = bool(prev_queries) and (len(prev_queries[-1].split()) >= 9 or "?" in prev_queries[-1])
+
+    _stopwords = {
+        "what", "which", "where", "when", "whose", "whom", "who", "how", "many", "much",
+        "from", "with", "that", "this", "were", "have", "been", "does", "did", "into",
+        "about", "between", "after", "before", "under", "over", "their", "there", "than",
+    }
+    q_content_words = {w for w in re.findall(r"[a-z0-9]{4,}", q_low) if w not in _stopwords}
+    if q_content_words:
+        overlap_ratio = sum(1 for w in q_content_words if w in obs_low) / len(q_content_words)
+    else:
+        overlap_ratio = 1.0
+
+    is_long_unfocused = False
+    if prev_queries:
+        last_q = prev_queries[-1]
+        unquoted_q = re.sub(r'"[^"]*"|\'[^\']*\'', " ENTITY ", last_q)
+        if (len(unquoted_q.split()) >= 14 or last_q.count("?") >= 2) and overlap_ratio < 0.35:
+            is_long_unfocused = True
 
     first_title_tokens = {
         next((w for w in re.findall(r"[a-z0-9]+", t.lower()) if w not in ("the", "a", "an")), "")
@@ -473,7 +498,7 @@ def build_step_retrieval_query(state, max_steps=4):
         cues.append("Observation status: no matching results returned, query missed.")
     elif is_repeat:
         cues.append("Observation status: repeated identical search query returning duplicate passages.")
-    elif is_long_q:
+    elif is_long_unfocused:
         cues.append("Observation status: overly long multi-clause query returned unfocused or weakly relevant passage.")
     elif step_num >= int(max_steps):
         cues.append(f"Observation status: final search budget turn ({step_num}/{int(max_steps)}) with only partial evidence so far.")
@@ -491,8 +516,8 @@ def build_step_retrieval_query(state, max_steps=4):
     if titles:
         cues.append("Titles: " + ", ".join(titles[:3]) + ".")
     summary = " ".join(cues)
-    if obs_clean and not is_empty:
-        summary += f" Excerpt: {obs_clean[:160]}"
+    if per_doc_excerpt and not is_empty:
+        summary += f" Excerpt: {per_doc_excerpt}"
     return summary
 
 
@@ -711,7 +736,7 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
         all_success_nodes = {
             r["node_id"]
             for r in rows
-            if r["reward"] == 1 and tree.nodes[r["node_id"]].valid
+            if float(r.get("sft_weight", float(r["reward"] == 1 and tree.nodes[r["node_id"]].valid))) > 0
         }
         batch = pack_training_rows(
             collector, tree, representatives, success_sft=sft_enabled,
@@ -782,6 +807,8 @@ def tree_multi_turn_loop(collector, gen_batch, actor, manager):
             batching=batching,
             seed=int(config.env.get("seed", 0)) + step,
             expanded_rows=rows if prepacked else None,
+            batch_size=int(config.env.tree_experience.get("dedup_expanded_batch_size", 256)),
+            max_mini_batches=int(config.env.tree_experience.get("dedup_max_minibatches", 6)),
         )
         tree.metrics["perf/dedup_batch_seconds"] = time.perf_counter() - start_dedup
         tree.metrics.update(real_node_loads(
@@ -847,7 +874,7 @@ def pack_training_rows(collector, tree, rows, success_sft=False, successful_node
         successful_nodes = {
             row["node_id"]
             for row in rows
-            if row["reward"] == 1 and tree.nodes[row["node_id"]].valid
+            if float(row.get("sft_weight", float(row["reward"] == 1 and tree.nodes[row["node_id"]].valid))) > 0
         }
     R = tensors["responses"].size(1)
     noexp_prompt_cache = {}
@@ -976,7 +1003,7 @@ def pack_training_rows(collector, tree, rows, success_sft=False, successful_node
         tensors[prefix + "_position_ids"] = compute_position_id_with_mask(masks)
     tensors["sft_weight"] = torch.tensor(
         [
-            float(row["reward"] == 1 and tree.nodes[row["node_id"]].valid)
+            float(row.get("sft_weight", float(row["reward"] == 1 and tree.nodes[row["node_id"]].valid)))
             if success_sft
             else 0.0
             for row in rows

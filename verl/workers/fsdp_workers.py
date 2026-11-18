@@ -113,6 +113,10 @@ class ActorRolloutRefWorker(Worker):
             world_size = int(os.environ.get("WORLD_SIZE", 1))
             torch.distributed.init_process_group(backend="cpu:gloo,cuda:nccl" if is_cuda_available else "cpu:gloo,npu:hccl", rank=rank, world_size=world_size)
 
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+
         # build device mesh for FSDP
         world_size = torch.distributed.get_world_size()
         # TODO(sgm): support FSDP hybrid shard for larger model
@@ -766,7 +770,16 @@ class ActorRolloutRefWorker(Worker):
         from contextlib import nullcontext
         is_lora = data.meta_info.pop("is_lora", False)
         adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
+        is_tree_mode = bool(data.meta_info.get("tree_mode", False))
+        dedup_mode = bool(data.meta_info.get("dedup_shared_prefix", False))
         log_prob_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        if is_tree_mode and not is_lora:
+            for extra_k in (
+                "is_padding_copy", "A_pos", "A_neg", "tree_advantage",
+                "edge_distill_weight", "kd_canonical", "kd_path_has_T", "sft_weight",
+            ):
+                if extra_k in data.batch:
+                    log_prob_keys.append(extra_k)
         non_tensor_keys = ["multi_modal_inputs"] if "multi_modal_inputs" in data.non_tensor_batch else []
         data = data.select(batch_keys=log_prob_keys, non_tensor_batch_keys=non_tensor_keys, deepcopy=False)
         data = data.to(get_torch_device().current_device())
@@ -775,11 +788,19 @@ class ActorRolloutRefWorker(Worker):
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
         data.meta_info["temperature"] = self.config.rollout.temperature
+        if is_tree_mode and not is_lora:
+            data.meta_info["tree_mode"] = True
+            data.meta_info["dedup_shared_prefix"] = dedup_mode
+        calc_ent = bool(self.config.actor.get("entropy_coeff", 0.0) != 0) or (
+            os.environ.get("T75_FORCE_ACTOR_ENTROPY", "0") == "1"
+        )
         # perform recompute log_prob
         with self.ulysses_sharding_manager:
             data = self.ulysses_sharding_manager.preprocess_data(data)
             with adapter_ctx:
-                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=True)
+                output, entropys = self.actor.compute_log_prob(data=data, calculate_entropy=calc_ent)
+            if entropys is None:
+                entropys = torch.zeros_like(output)
             output = DataProto.from_dict(
                 tensors={"old_log_probs": output, "entropys": entropys},
                 meta_info={"temperature": self.config.rollout.temperature},

@@ -34,9 +34,9 @@ def test_module1_v3_dual_pool_bank_and_no_alfworld_pollution():
     )
     task_exps = memory.experiences["task_experiences"]
     step_exps = memory.experiences["step_experiences"]
-    assert len(task_exps) == 11
+    assert len(task_exps) == 10
     assert len(step_exps) == 13
-    assert {x["experience_id"] for x in task_exps} == {f"task_{i:06d}" for i in range(1, 12)}
+    assert {x["experience_id"] for x in task_exps} == {f"task_{i:06d}" for i in range(2, 12)}
     assert {x["experience_id"] for x in step_exps} == {f"step_{i:06d}" for i in range(1, 14)}
 
     # Ensure zero ALFWorld strings in search hints or bank
