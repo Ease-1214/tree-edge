@@ -1033,7 +1033,8 @@ def audit_training_tokens(batch, tree, step, path, seed=0):
     from agent_system.tree.core import leaf_advantages
 
     rng = random.Random(seed + step)
-    advantages = tree.training_advantages()
+    base_advantages = leaf_advantages(tree.leaves)
+    penalty_coef = float(getattr(tree, "invalid_action_penalty_coef", 0.0))
     samples = {"kd": [], "grpo": []}
     eligible = {"kd": [], "grpo": []}
     R = batch.batch["responses"].shape[1]
@@ -1049,8 +1050,11 @@ def audit_training_tokens(batch, tree, step, path, seed=0):
         node = tree.nodes[nid]
         assert torch.equal(batch.batch["input_ids"][i], node.tensors["input_ids"])
         assert torch.equal(batch.batch["responses"][i], node.tensors["responses"])
+        expected_adv = base_advantages[batch.non_tensor_batch["leaf_id"][i]] - (
+            penalty_coef if (penalty_coef != 0.0 and not node.valid) else 0.0
+        )
         assert float(batch.batch["tree_advantage"][i]) == float(
-            np.float32(advantages[batch.non_tensor_batch["leaf_id"][i]])
+            np.float32(expected_adv)
         )
         valid = batch.batch["response_mask"][i].nonzero().flatten().tolist()
         eligible["grpo"].extend((i, t) for t in valid)
