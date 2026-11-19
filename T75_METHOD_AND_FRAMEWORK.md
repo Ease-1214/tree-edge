@@ -80,7 +80,7 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
 
 ### 2. Search API（训练与评测环境网页/文档检索）
 * **代码位置**：`agent_system/environments/env_package/search/third_party/skyrl_gym/tools/search.py`
-* **调用地址**：`POST http://127.0.0.1:29661/retrieve`（由 248 服务器 `172.18.167.248:18125` 经 SSH `-R` 映射至 31/249，由 `watchdog_wandb_proxy.py` 自动守护）
+* **调用地址**：`POST http://127.0.0.1:29661/retrieve`（由 248 服务器 `172.18.167.251:18125 (GPU 0-2)` 经 SSH `-R` 映射至 31/249，由 `watchdog_wandb_proxy.py` 自动守护）
 * **请求与返回格式**（`api_format="search_r1_batch"`，`topk=3`，`request_batch_size=128`，`timeout=60s`）：
   ```json
   // Request
@@ -91,7 +91,7 @@ $$\mathcal{L}_{\text{total}} = \mathcal{L}_{\text{PG}} + \lambda_{\text{OPSD}} \
 
 ### 3. Embedding 经验向量检索（默认 29700 远程零显存服务 + 本地回退）
 * **代码位置**：`agent_system/memory/experience_memory.py` (`_encode_remote` / `_encode_dynamic`)
-* **默认方式（零本地 GPU 显存开销）**：`run_t75.sh` 默认设置 `EDGE_EMBED_URL=http://127.0.0.1:29700`（由 248 服务器 `embedding_server.py` 托管 `Qwen3-Embedding-0.6B` 并经 SSH `-R` 映射至 31/249，`EDGE_CONTROLLER_GPUS=0`）。
+* **默认方式（零本地 GPU 显存开销）**：`run_t75.sh` 默认设置 `EDGE_EMBED_URL=http://127.0.0.1:29700`（由 251 服务器 GPU 7 的 `embedding_server.py` 托管 `Qwen3-Embedding-0.6B`（`0.0.0.0:29700`），经 248 持久化 SSH 隧道统一映射至 248/249/31 本机 `127.0.0.1:29700`，`EDGE_CONTROLLER_GPUS=0`）。
 * **本地回退方式**：若清空 `EDGE_EMBED_URL=""`，则进程内通过 `SentenceTransformer("/home/zehao/echo-collab/T061/assets/Qwen3-Embedding-0.6B", device="cuda:0")` 本地加载。
 
 ### 4. W&B 高可用代理隧道
@@ -122,3 +122,20 @@ ightarrow$ `old_log_prob` $
 ightarrow$ `update_actor` 编排 |
 | **统一启动入口** | `examples/grpo_trainer/run_t75.sh` | 支持 `GPU_PROFILE=2xa40 / 4x3090 / 8x3090 / auto` 及 W&B 代理自动探测回退 |
 | **架构与接口手册** | `docs/T75_ARCHITECTURE_AND_INTERFACES.md` | 全链路数据流、核心类/Tensor/JSON 接口契约与历史文档归档索引 |
+
+---
+
+## 四、最新集群部署与实测基线（2026-11-19）
+
+### 1. 集群服务拓扑
+* **Wiki 检索服务（`251` GPU 0–2）**：`e5-base-v2` + `e5_Flat.index` 运行于 `172.18.167.251:18125`，通过 `248` 持久化自动重连 SSH 隧道统一暴露为 `248 / 249 / 31` 本机 `http://127.0.0.1:29661/retrieve`。
+* **经验 Embedding 服务（`251` GPU 7）**：`Qwen3-Embedding-0.6B` 运行于 `172.18.167.251:29700`（峰值显存 ~3.6 GiB），统一映射为三机 `http://127.0.0.1:29700`。
+* **W&B 代理**：`248` 本机走 `http://127.0.0.1:7890`；`31` 走 `248` 持久化转发的 `http://127.0.0.1:29662`（避免使用不稳定的临时端口 `29790`）。
+
+### 2. 早期实测与离线诊断结论（Qwen2.5-3B-Instruct LoRA r64）
+* **前 20 步表现（`248` 4×3090，W&B `jsshwxhp`）**：自然通过率由 `0.280` 升至 `0.379–0.401`（`4/4` 全对率由 `9.4%` 翻倍至 `20.7%`，`0/4` 由 `52.7%` 降至 `43.0%–46.5%`）；格式合法率 `0.777 → 0.998`；单步耗时由 `898s` 降至 `~506–586s`。
+* **离线策略熵与梯度诊断（`31` GPU 3 A40，Base / Step 10 / Step 20）**：
+  * **策略熵稳定未坍塌**：On-policy 完整词表熵 `Base 0.6857 → Step 10 0.7072 → Step 20 0.7038 nats`；
+  * **三目标梯度正向协同**：`coef=0.05` 下全句平均 `||g_sft|| ≈ 7.5% ||g_pg||`、`||g_opsd|| ≈ 3.1% ||g_pg||`（在 OPSD 关键决策 token 上局部强度约 5–8 倍），余弦相似度全正（Step 20：`cos(pg, opsd)=+0.186`、`cos(pg, sft)=+0.207`、`cos(opsd, sft)=+0.593`）；
+  * **动态经验库有效进化**：Step 15 自动淘汰了损害 EM 格式的负效用种子 `step_000008`，Step 级新经验整体正收益显著优于 Task 级。
+* **7B 扩展实验（`31` GPU 1–2，2×A40，W&B `4adbo32c`）**：`Qwen2.5-7B-Instruct` LoRA（`PERF_VLLM_UTIL=0.45`, `PERF_PPO_TOKENS=12288`, `PERF_LOGPROB_TOKENS=24576`）已跑通，Step 1–2 自然通过率 `0.327 → 0.332`，单步耗时 `~17.7 min`，峰值显存 `44.5 / 48 GB`。
