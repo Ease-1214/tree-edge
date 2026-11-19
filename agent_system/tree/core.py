@@ -308,15 +308,29 @@ class QuestionEvidence:
             upper_2se=mean + 2 * se if se is not None else None,
         )
 
-    def merge_window(self, bank, step, beta=0.1, management_interval_steps=5):
+    def merge_window(
+        self,
+        bank,
+        step,
+        beta=0.1,
+        management_interval_steps=5,
+        negative_utility_threshold=None,
+    ):
         """EMA over all per-Fork gains; consecutive-negative window tracking.
 
         Only a strictly positive window (delta > 0) resets the negative streak.
-        Neutral (delta == 0) or unobserved windows preserve the existing streak
-        so harmful experiences are not washed clean by uninformative turns.
+        When negative_utility_threshold is provided, any experience already at
+        or below the threshold advances its negative streak on unobserved or
+        zero-gain windows too, preventing frozen negative ("zombie") experiences
+        from occupying first-stage retrieval slots indefinitely.
         Hard deletion is done later by ExperienceMemory.evict_excess_experiences.
         """
         updates = []
+        neg_thresh = (
+            float(negative_utility_threshold)
+            if negative_utility_threshold is not None
+            else None
+        )
         for pool in ("task_experiences", "step_experiences"):
             for item in bank.get(pool, []):
                 eid = item["experience_id"]
@@ -343,6 +357,11 @@ class QuestionEvidence:
                     elif delta > 0:
                         evidence["consecutive_negative_windows"] = 0
                         evidence["last_negative_management_step"] = None
+                    elif neg_thresh is not None and new <= neg_thresh:
+                        evidence["consecutive_negative_windows"] = (
+                            int(evidence.get("consecutive_negative_windows", 0) or 0) + 1
+                        )
+                        evidence["last_negative_management_step"] = int(step)
                     updates.append(dict(
                         experience_id=eid,
                         old_utility=old,
@@ -352,6 +371,11 @@ class QuestionEvidence:
                         fork_count=len(credits),
                         consecutive_negative_windows=evidence["consecutive_negative_windows"],
                     ))
+                elif neg_thresh is not None and float(item.get("utility", 0.0)) <= neg_thresh:
+                    evidence["consecutive_negative_windows"] = (
+                        int(evidence.get("consecutive_negative_windows", 0) or 0) + 1
+                    )
+                    evidence["last_negative_management_step"] = int(step)
         self.state["pending"] = {}
         return updates
 

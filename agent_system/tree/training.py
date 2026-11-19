@@ -131,12 +131,15 @@ def manage_tree_experiences(trainer, tree):
     if step % interval:
         metrics["bank/window_pending"] = 1.0
         return metrics
+    management = trainer.config.env.experience_memory.get("management", {})
+    neg_thresh = management.get("eviction_utility_threshold", -0.05)
     bank = deepcopy(memory.experiences)
     updates = evidence.merge_window(
         bank,
         step,
         beta=float(cfg.utility_ema_beta),
         management_interval_steps=interval,
+        negative_utility_threshold=float(neg_thresh) if neg_thresh is not None else None,
     )
     memory.replace_experiences_keep_cache_incremental(bank)
     metrics["bank/utility_updates"] = len(updates)

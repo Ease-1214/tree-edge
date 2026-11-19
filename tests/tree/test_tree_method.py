@@ -388,3 +388,31 @@ def test_tree_checkpoint_roundtrip_and_identity(tmp_path):
     path.write_text(json.dumps(state))
     with pytest.raises(ValueError):
         restore_tree_state(trainer)
+
+
+def test_unobserved_negative_experience_advances_streak_when_threshold_set():
+    e = QuestionEvidence()
+    bank = {
+        "task_experiences": [
+            {"experience_id": "neg_zombie", "utility": -0.02, "created_at_step": 0},
+            {"experience_id": "good_idle", "utility": 0.02, "created_at_step": 0},
+            {"experience_id": "mild_neg_idle", "utility": -0.002, "created_at_step": 0},
+        ],
+        "step_experiences": [],
+    }
+    # Unobserved window: zombie below threshold advances streak; positive and mild-neg idle do not
+    e.merge_window(bank, 5, negative_utility_threshold=-0.005)
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 1
+    assert bank["task_experiences"][1]["evidence"]["consecutive_negative_windows"] == 0
+    assert bank["task_experiences"][2]["evidence"]["consecutive_negative_windows"] == 0
+    # Zero-gain window while still below threshold also advances streak
+    e.record({("neg_zombie", "q10"): 0})
+    e.merge_window(bank, 10, negative_utility_threshold=-0.005)
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 2
+    # Another unobserved window reaches 3
+    e.merge_window(bank, 15, negative_utility_threshold=-0.005)
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 3
+    # Positive-gain window still resets streak to 0
+    e.record({("neg_zombie", "q20"): 1})
+    e.merge_window(bank, 20, negative_utility_threshold=-0.005)
+    assert bank["task_experiences"][0]["evidence"]["consecutive_negative_windows"] == 0
