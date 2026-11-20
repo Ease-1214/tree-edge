@@ -850,7 +850,14 @@ class DataParallelPPOActor(BasePPOActor):
             non_tensor_select_keys = ["multi_modal_inputs"]
             dataloader = data.select(select_keys, non_tensor_select_keys).chunk(num_mini_batches)
         else:
-            dataloader = [batch[batch["dedup_mini"] == mini] for mini in batch["dedup_mini"].unique(sorted=True)] if dedup else batch.split(self.config.ppo_mini_batch_size)
+            fixed_n_mini = int(self.config.get("fixed_num_minibatches", 0) or 0)
+            if dedup:
+                dataloader = [batch[batch["dedup_mini"] == mini] for mini in batch["dedup_mini"].unique(sorted=True)]
+            elif fixed_n_mini > 0:
+                n_chunks = min(fixed_n_mini, len(batch))
+                dataloader = list(batch.chunk(n_chunks)) if n_chunks > 0 else []
+            else:
+                dataloader = batch.split(self.config.ppo_mini_batch_size)
 
         if self._explicit_replica_sync or self._fsdp_sync_optional_forwards:
             count = torch.tensor([len(dataloader)], dtype=torch.int64, device=get_torch_device().current_device())
